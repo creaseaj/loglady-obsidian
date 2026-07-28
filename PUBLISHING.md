@@ -18,9 +18,13 @@ any pushed tag.
    equals the manifest version:
 
    ```
-   git tag 0.1.0
-   git push origin 0.1.0
+   git tag 0.1.1
+   git push origin 0.1.1
    ```
+
+   Tag the merged commit on `main` that carries the version bump, not an
+   earlier one — the manifest inside the tagged tree is what reviewers and the
+   installer read.
 
 3. The workflow runs `npm ci && npm run build && npm test`, attests the build,
    and opens a **draft** release with `main.js`, `manifest.json`, and
@@ -30,6 +34,13 @@ any pushed tag.
 
 The built `main.js` is deliberately not committed (`.gitignore`), matching the
 sample plugin: the release assets are the distribution channel.
+
+**Don't create the release by hand in the GitHub UI.** Publishing a hand-made
+draft creates the tag *at publish time* from whatever `main` points at, after
+the workflow's chance to fire has passed — so nothing gets built and the
+release goes out with an empty asset list, which Obsidian cannot install. That
+is what happened to `0.1.0`, which is why the first real release is `0.1.1`.
+Push the tag and let the workflow open the draft.
 
 ## Submitting to the Community Plugins list
 
