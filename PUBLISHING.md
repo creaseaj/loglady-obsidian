@@ -7,40 +7,49 @@ is needed to use or build the plugin.
 ## Cutting a release
 
 Releases are built by `.github/workflows/release.yml` (the workflow from
-Obsidian's `obsidian-sample-plugin`, plus a `npm test` step), which fires on
-any pushed tag.
+Obsidian's `obsidian-sample-plugin`, plus a `npm test` step). It runs
+`npm ci && npm run build && npm test`, attests the build, and attaches
+`main.js`, `manifest.json`, and `styles.css` as individual files — not zipped,
+because Obsidian downloads them by name. The built `main.js` is deliberately
+not committed (`.gitignore`): the release assets are the distribution channel.
 
-1. Bump `version` in `manifest.json` and `package.json` to the new semver
+First, in either flow, bump the version:
+
+1. Set `version` in `manifest.json` **and** `package.json` to the new semver
    number, and add a `"<version>": "<minAppVersion>"` line to `versions.json`
    so older Obsidian installs resolve the newest version they can run.
-2. Commit, then tag the commit with the version number **exactly as it appears
-   in `manifest.json`** — no `v` prefix. Obsidian looks for a release whose tag
-   equals the manifest version:
-
-   ```
-   git tag 0.1.1
-   git push origin 0.1.1
-   ```
-
-   Tag the merged commit on `main` that carries the version bump, not an
-   earlier one — the manifest inside the tagged tree is what reviewers and the
+2. Commit and merge that to `main`. The tag must land on the commit carrying
+   the bump — the manifest inside the tagged tree is what reviewers and the
    installer read.
 
-3. The workflow runs `npm ci && npm run build && npm test`, attests the build,
-   and opens a **draft** release with `main.js`, `manifest.json`, and
-   `styles.css` attached as individual files (not zipped — Obsidian downloads
-   them by name).
-4. Review the draft release notes and publish it.
+The tag name is the version **exactly as it appears in `manifest.json`**, with
+**no `v` prefix** — Obsidian matches the release tag to the manifest version.
+The workflow fires on both triggers below, so either flow works.
 
-The built `main.js` is deliberately not committed (`.gitignore`), matching the
-sample plugin: the release assets are the distribution channel.
+### From the GitHub UI
 
-**Don't create the release by hand in the GitHub UI.** Publishing a hand-made
-draft creates the tag *at publish time* from whatever `main` points at, after
-the workflow's chance to fire has passed — so nothing gets built and the
-release goes out with an empty asset list, which Obsidian cannot install. That
-is what happened to `0.1.0`, which is why the first real release is `0.1.1`.
-Push the tag and let the workflow open the draft.
+1. **Releases → Draft a new release**.
+2. **Choose a tag** → type the version (e.g. `0.1.1`) → **Create new tag: … on
+   publish**. **Target** = `main`.
+3. Add a title (the version), then **Publish release**.
+4. The `release: published` trigger builds and uploads the three assets to that
+   release within a minute or two. Refresh the release page to see them.
+
+### From the CLI
+
+```
+git tag 0.1.1        # exact manifest version, no "v"
+git push origin 0.1.1
+```
+
+The `push` tag trigger builds and opens a **draft** release with the assets
+attached; review its notes and publish it.
+
+Either way the final step converges on the workflow's "Attach plugin assets"
+step, which uploads to an existing (UI-published) release or opens a fresh
+draft (pushed tag) as appropriate. Do **not** attach the assets by hand: an
+empty release is what Obsidian cannot install, and it is what happened to
+`0.1.0` — the reason the first real release is `0.1.1`.
 
 ## Submitting to the Community Plugins list
 
