@@ -168,6 +168,14 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
     else if (cy > 0) cy--;
   }
   function moveCancelsWrap() { pendingWrap = false; }
+  /**
+   * Break the continuation link *into* row y — `wrap[y-1]` says row y-1 flows
+   * into row y, which is xterm's `isWrapped` flag living on row y itself.
+   * Erasing or displacing row y invalidates it. Missing this glued a shell's
+   * command line onto the prompt banner redrawn beneath it, and swallowed the
+   * banner line the working-directory regex reads.
+   */
+  function breakIncoming(y: number) { if (y > 0) wrap[y - 1] = false; }
   function put(cp: number) {
     if (pendingWrap) { wrap[cy] = true; cx = 0; lf(); pendingWrap = false; }
     if (insertMode) for (let x = cols - 1; x > cx; x--) grid[cy][x] = grid[cy][x - 1];
@@ -225,8 +233,16 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
             // Partial erases (0/1) are prompt and redraw bookkeeping around
             // content that is still on screen — committing there would double
             // lines up, so only the full erase flushes to history.
-            if (m === 0) { for (let x = cx; x < cols; x++) grid[cy][x] = " "; for (let y = cy + 1; y < rows; y++) { grid[y] = blank(); wrap[y] = false; } }
-            else if (m === 1) { for (let x = 0; x <= cx; x++) grid[cy][x] = " "; for (let y = 0; y < cy; y++) { grid[y] = blank(); wrap[y] = false; } }
+            if (m === 0) {
+              for (let x = cx; x < cols; x++) grid[cy][x] = " ";
+              wrap[cy] = false;
+              if (cx === 0) breakIncoming(cy);
+              for (let y = cy + 1; y < rows; y++) { grid[y] = blank(); wrap[y] = false; }
+            } else if (m === 1) {
+              for (let x = 0; x <= cx; x++) grid[cy][x] = " ";
+              breakIncoming(cy);
+              for (let y = 0; y < cy; y++) { grid[y] = blank(); wrap[y] = false; }
+            }
             else if (m === 3) { /* erase saved lines: `out` is that scrollback, and it is the whole point here — keep it */ }
             else { commitScreen(); clearScreen(); }
             break;
@@ -240,10 +256,10 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
           }
           case 0x4b: { // K erase line
             const m = p0;
-            if (m === 0) { for (let x = cx; x < cols; x++) grid[cy][x] = " "; }
-            else if (m === 1) { for (let x = 0; x <= cx; x++) grid[cy][x] = " "; }
-            else { grid[cy] = blank(); }
-            wrap[cy] = false; break;
+            if (m === 0) { for (let x = cx; x < cols; x++) grid[cy][x] = " "; wrap[cy] = false; if (cx === 0) breakIncoming(cy); }
+            else if (m === 1) { for (let x = 0; x <= cx; x++) grid[cy][x] = " "; breakIncoming(cy); }
+            else { grid[cy] = blank(); wrap[cy] = false; breakIncoming(cy); }
+            break;
           }
           case 0x40: { const k = p0 || 1; for (let x = cols - 1; x >= cx + k; x--) grid[cy][x] = grid[cy][x - k]; for (let x = cx; x < cx + k && x < cols; x++) grid[cy][x] = " "; break; } // @ insert
           case 0x50: { const k = p0 || 1; for (let x = cx; x < cols; x++) grid[cy][x] = (x + k < cols) ? grid[cy][x + k] : " "; break; } // P delete
@@ -256,7 +272,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
               wrap.splice(bot, 1); wrap.splice(cy, 0, false);
               rowByte.splice(bot, 1); rowByte.splice(cy, 0, pos);
             }
-            cx = 0; break;
+            breakIncoming(cy); cx = 0; break;
           }
           case 0x4d: { // M delete lines
             if (cy < top || cy > bot) break;
@@ -266,7 +282,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
               wrap.splice(cy, 1); wrap.splice(bot, 0, false);
               rowByte.splice(cy, 1); rowByte.splice(bot, 0, pos);
             }
-            cx = 0; break;
+            breakIncoming(cy); cx = 0; break;
           }
           case 0x53: scrollRegionUp(p0 || 1); break; // S scroll up
           case 0x54: scrollRegionDown(p0 || 1); break; // T scroll down

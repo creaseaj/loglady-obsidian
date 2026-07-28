@@ -105,6 +105,14 @@ const AGREE = {
   "device status report request": `${ESC}[6ntext\r\n`,
   "window manipulation (CSI t)": `${ESC}[8;24;80ttext\r\n`,
   "bracketed paste markers": `${ESC}[200~pasted text${ESC}[201~\r\n`,
+
+  // A zsh prompt redraw as it actually appears in a recording: type into the
+  // last column (arming autowrap and marking the row as continued), carriage
+  // return, then ESC[J and a fresh prompt banner drawn beneath. The erase has
+  // to sever the continuation, or the command line glues onto the banner and
+  // the banner line the cwd regex reads disappears. Found in a real Kali log.
+  "prompt redraw after end-of-row + ED": "ex" + " ".repeat(COLS - 2) + `\r${ESC}[J┌──(user)-[~]\r\n└─$ exit\r\n`,
+  "erase-line severs a wrapped continuation": "x".repeat(COLS) + `redraw\r${ESC}[2Kfresh\r\n`,
 };
 
 for (const [name, body] of Object.entries(AGREE)) {
