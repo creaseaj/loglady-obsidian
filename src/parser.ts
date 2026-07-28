@@ -1,14 +1,22 @@
 /*
- * Terminal-session parsing engine — ported from LogLady (mqor's loglady.html).
- * Pure data transforms, no DOM/Obsidian dependency, so this is unit-testable
- * under plain Node and shared verbatim between the browser tool and this
- * plugin's import flow.
+ * Terminal-session parsing engine. Pure data transforms, no DOM/Obsidian
+ * dependency, so it is unit-testable under plain Node.
  *
  * Pipeline: parseSession() replays a script(1) typescript through a small VT
  * emulator (replay()) to reconstruct clean visible lines, maps each line to an
  * elapsed-time offset via the paired timing file (buildTiming()), then splits
- * the reconstructed lines into command/output pairs at shell prompts
- * (extractEntries()).
+ * the reconstructed lines into command/output pairs.
+ *
+ * Where a command begins is detected best-signal-first (see extractEntries):
+ *   1. OSC 133 semantic prompt marks (A/B/C/D) — purpose-built, and carry the
+ *      command's exit code;
+ *   2. bracketed-paste toggles (DECSET 2004 h/l) — emitted by the line editor
+ *      of every modern interactive shell, so they don't depend on prompt text;
+ *   3. a prompt-matching regex — the fallback for shells that emit neither.
+ * (1) and (2) both delimit the command *input* structurally, so the command
+ * text is read straight off the reconstructed screen (redraws and history
+ * edits already resolved) rather than scraped from prompt lines. replay()
+ * records these as `marks`; the regex path works on `lines` alone.
  *
  * ANSI colour (SGR) is intentionally not tracked here — Markdown notes have no
  * portable colour form, so the plugin only needs plain reconstructed text.
@@ -24,9 +32,26 @@ export interface ParsedTitle {
   byte: number;
 }
 
+/**
+ * A shell-integration signal recovered during replay. `input`/`submit` bracket
+ * the command line (submit carries the command text read off-screen at that
+ * instant); `prompt` is OSC 133's prompt-start (a cleaner output cutoff than
+ * `input`); `end` carries an OSC 133 exit code for the command just finished.
+ */
+export interface ShellMark {
+  kind: "prompt" | "input" | "submit" | "end";
+  byte: number;
+  command?: string;
+  /** On `input`: the prompt text left of the cursor, so the next command's
+   *  prompt line can be trimmed off the prior output without a prompt regex. */
+  prompt?: string;
+  exit?: number | null;
+}
+
 export interface ReplayResult {
   lines: ParsedLine[];
   titles: ParsedTitle[];
+  marks: ShellMark[];
 }
 
 export interface CommandEntry {
@@ -38,6 +63,7 @@ export interface CommandEntry {
   noise: boolean;
   at: Date | null;
   dur: number | null;
+  exit: number | null;
 }
 
 export interface ParsedSession {
@@ -79,6 +105,10 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   let cx = 0, cy = 0, pendingWrap = false;
   const out: { row: string[]; wrapped: boolean; byte: number }[] = [];
   const titles: ParsedTitle[] = [];
+  const marks: ShellMark[] = [];
+  // Where the current command line began (cursor just past the prompt), set at
+  // the input mark and read back at submit to lift the command off the screen.
+  let inputRow = -1, inputCol = 0;
 
   let pos = 0;
   // Alternate screen buffer (DECSET 1049/1047/47): full-screen programs draw
@@ -176,6 +206,31 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
    * banner line the working-directory regex reads.
    */
   function breakIncoming(y: number) { if (y > 0) wrap[y - 1] = false; }
+  /**
+   * The command text as it stands on screen right now, from a start position
+   * just past the prompt through the end of its (possibly wrapped) line. Read
+   * at submit time, so cursor motion, redraws, and history-recall edits are
+   * already resolved into the final visible characters.
+   */
+  function commandTextFrom(sy: number, sx: number): string {
+    if (sy < 0 || sy >= rows) return "";
+    const parts = [grid[sy].slice(Math.min(sx, cols)).join("")];
+    let y = sy;
+    while (y < rows - 1 && wrap[y]) { y++; parts.push(grid[y].join("")); }
+    return parts.join("").replace(/\s+$/, "");
+  }
+  /** Route an OSC string to a shell mark (OSC 133) or the window-title list. */
+  function handleOsc(s: string, byte: number) {
+    if (s.startsWith("133;")) {
+      const a = s.charAt(4);
+      if (a === "A") marks.push({ kind: "prompt", byte });
+      else if (a === "B") { inputRow = cy; inputCol = cx; marks.push({ kind: "input", byte, prompt: grid[cy].slice(0, cx).join("") }); }
+      else if (a === "C") marks.push({ kind: "submit", byte, command: commandTextFrom(inputRow, inputCol) });
+      else if (a === "D") { const m = s.match(/^133;D;(-?\d+)/); marks.push({ kind: "end", byte, exit: m ? parseInt(m[1], 10) : null }); }
+      return;
+    }
+    titles.push({ text: s, byte });
+  }
   function put(cp: number) {
     if (pendingWrap) { wrap[cy] = true; cx = 0; lf(); pendingWrap = false; }
     if (insertMode) for (let x = cols - 1; x > cx; x--) grid[cy][x] = grid[cy][x - 1];
@@ -251,6 +306,12 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
             const set = fin === 0x68;
             if (priv && (p0 === 1049 || p0 === 1047 || p0 === 47)) { if (set) enterAlt(); else leaveAlt(); }
             else if (priv && p0 === 7) autowrap = set; // DECAWM
+            else if (priv && p0 === 2004) {
+              // Bracketed paste: the line editor turns it on when it starts
+              // reading a command at the prompt, off the instant Enter submits.
+              if (set) { inputRow = cy; inputCol = cx; marks.push({ kind: "input", byte: pos, prompt: grid[cy].slice(0, cx).join("") }); }
+              else if (inputRow >= 0) { marks.push({ kind: "submit", byte: pos, command: commandTextFrom(inputRow, inputCol) }); inputRow = -1; }
+            }
             else if (!priv && p0 === 4) insertMode = set; // IRM
             break;
           }
@@ -320,8 +381,8 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
         let j = i + 2, s = "";
         const cap = Math.min(n, i + 4096);
         while (j < cap && bytes[j] !== 0x07 && bytes[j] !== 0x0a && bytes[j] !== 0x0d && !(bytes[j] === 0x1b && bytes[j + 1] === 0x5c)) { s += String.fromCharCode(bytes[j]); j++; }
-        if (bytes[j] === 0x07) { titles.push({ text: s, byte: i }); i = j + 1; }
-        else if (bytes[j] === 0x1b && bytes[j + 1] === 0x5c) { titles.push({ text: s, byte: i }); i = j + 2; }
+        if (bytes[j] === 0x07) { handleOsc(s, i); i = j + 1; }
+        else if (bytes[j] === 0x1b && bytes[j + 1] === 0x5c) { handleOsc(s, i); i = j + 2; }
         else i += 2; // unterminated: treat as a stray escape and keep parsing
         continue;
       } else if (nx === 0x37) { savedCursor = { cx, cy }; i += 2; continue; } // 7 DECSC save cursor
@@ -361,7 +422,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   }
   if (cur) { (cur as any).text = (cur as any).text.replace(/\s+$/, ""); lines.push(cur as ParsedLine); }
   while (lines.length && lines[lines.length - 1].text === "") lines.pop();
-  return { lines, titles };
+  return { lines, titles, marks };
 }
 
 /* ---------------------------------------------------------------------------
@@ -398,11 +459,97 @@ function parseWhen(s: string): number | null {
 }
 
 /* ---------------------------------------------------------------------------
- * Command extraction — split reconstructed lines into command/output pairs at
- * shell prompts, tracking the working directory from Kali-style two-line
- * prompts and/or OSC window-title updates.
+ * Command extraction. extractEntries() is the dispatcher: it uses the shell
+ * marks recovered during replay when the recording carries them (every modern
+ * interactive shell), and falls back to the prompt regex otherwise.
  * ------------------------------------------------------------------------- */
-export function extractEntries(lines: ParsedLine[], titles: ParsedTitle[], promptSrc?: string, cwdSrc?: string): CommandEntry[] {
+export function extractEntries(lines: ParsedLine[], titles: ParsedTitle[], marks: ShellMark[], promptSrc?: string, cwdSrc?: string): CommandEntry[] {
+  if (marks.some(m => m.kind === "submit")) return extractEntriesFromMarks(lines, titles, marks, cwdSrc);
+  return extractEntriesByPrompt(lines, titles, promptSrc, cwdSrc);
+}
+
+/**
+ * Marker-based extraction. `input`/`submit` (bracketed paste, or OSC 133 B/C)
+ * bracket each command; the command text was lifted off the screen at submit,
+ * so it needs no prompt stripping. Output is the reconstructed lines between a
+ * submit and the next command's prompt/input, with the next prompt banner
+ * trimmed off the tail (the regexes serve only that cleanup here, never the
+ * boundary decision, so a prompt they don't match costs at most a stray
+ * trailing line — never a missed or merged command).
+ */
+export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle[], marks: ShellMark[], cwdSrc?: string): CommandEntry[] {
+  let cwdRe: RegExp | null;
+  try { cwdRe = cwdSrc ? new RegExp(cwdSrc) : new RegExp(DEFAULT_CWD_RE); } catch { cwdRe = null; }
+  const promptRe = new RegExp(DEFAULT_PROMPT_RE);
+
+  interface Cmd { command: string; submitByte: number; boundaryByte: number; promptPrefix: string; exit: number | null; }
+  const cmds: Cmd[] = [];
+  // The earliest boundary of the command currently being read — its OSC 133
+  // prompt-start if present, else its input mark. Used as the *previous*
+  // command's output cutoff so a prompt never bleeds into the prior output.
+  let boundary: number | null = null, prompt = "";
+  for (const m of marks) {
+    if (m.kind === "prompt") { if (boundary == null) boundary = m.byte; }
+    else if (m.kind === "input") { if (boundary == null) boundary = m.byte; prompt = m.prompt || ""; }
+    else if (m.kind === "submit") {
+      cmds.push({ command: (m.command || "").trim(), submitByte: m.byte, boundaryByte: boundary ?? m.byte, promptPrefix: prompt, exit: null });
+      boundary = null; prompt = "";
+    } else if (m.kind === "end") {
+      if (cmds.length) cmds[cmds.length - 1].exit = m.exit ?? null;
+    }
+  }
+  if (!cmds.length) return [];
+
+  // Working directory over time, from OSC window titles ("user@host: <cwd>")
+  // and two-line-prompt banners, looked up by byte at each command.
+  const cwdEvents: { byte: number; cwd: string }[] = [];
+  for (const t of titles) { const tm = t.text.match(/:\s*(.+)$/); if (tm) cwdEvents.push({ byte: t.byte, cwd: tm[1].trim() }); }
+  if (cwdRe) for (const ln of lines) { const cm = ln.text.match(cwdRe); if (cm) cwdEvents.push({ byte: ln.byte, cwd: cm[1] }); }
+  cwdEvents.sort((a, b) => a.byte - b.byte);
+  const cwdAt = (byte: number): string => {
+    let cwd = "";
+    for (const e of cwdEvents) { if (e.byte <= byte) cwd = e.cwd; else break; }
+    return cwd;
+  };
+
+  const entries: CommandEntry[] = [];
+  for (let k = 0; k < cmds.length; k++) {
+    const c = cmds[k];
+    const endByte = k + 1 < cmds.length ? cmds[k + 1].boundaryByte : Infinity;
+    const outLines = lines.filter(ln => ln.byte >= c.submitByte && ln.byte < endByte).map(ln => ln.text);
+    while (outLines.length && outLines[0] === "") outLines.shift();
+    // Drop the next command's prompt line where it trails this output. The
+    // bracketed-paste boundary sits just after the prompt, so the prompt (and,
+    // for a two-line prompt, its banner) lands here. The next command's own
+    // captured prompt text matches it exactly — config-independent — with the
+    // regexes covering only the extra banner row a shape like Kali's adds.
+    const next = k + 1 < cmds.length ? cmds[k + 1] : null;
+    const nextLine = next ? (next.promptPrefix + next.command).replace(/\s+$/, "") : "";
+    const nextPrompt = next ? next.promptPrefix.replace(/\s+$/, "") : "";
+    while (outLines.length) {
+      const last = outLines[outLines.length - 1].replace(/\s+$/, "");
+      const isNextPrompt = last !== "" && (last === nextLine || (nextPrompt !== "" && last === nextPrompt));
+      if (last === "" || isNextPrompt || promptRe.test(last) || (cwdRe && cwdRe.test(last))) outLines.pop();
+      else break;
+    }
+    const output = outLines.join("\n");
+    const empty = output.trim() === "";
+    // A submit with no command text is a bare Enter or a Ctrl-C at the prompt —
+    // a boundary, not a command. Bracketed paste marks every such keypress, so
+    // (unlike the regex path) these turn up routinely; hide them as noise.
+    const noise = c.command === "" || /^exit(\s+\d+)?$/.test(c.command);
+    entries.push({ command: c.command, cwd: cwdAt(c.submitByte), byte: c.submitByte, output, empty, noise, at: null, dur: null, exit: c.exit });
+  }
+  return entries;
+}
+
+/* ---------------------------------------------------------------------------
+ * Regex fallback — split reconstructed lines into command/output pairs at
+ * shell prompts, tracking the working directory from Kali-style two-line
+ * prompts and/or OSC window-title updates. Used only when a recording carries
+ * no shell-integration marks.
+ * ------------------------------------------------------------------------- */
+export function extractEntriesByPrompt(lines: ParsedLine[], titles: ParsedTitle[], promptSrc?: string, cwdSrc?: string): CommandEntry[] {
   let promptRe: RegExp, cwdRe: RegExp | null;
   try { promptRe = new RegExp(promptSrc || DEFAULT_PROMPT_RE); } catch { promptRe = new RegExp(DEFAULT_PROMPT_RE); }
   try { cwdRe = cwdSrc ? new RegExp(cwdSrc) : new RegExp(DEFAULT_CWD_RE); } catch { cwdRe = null; }
@@ -425,7 +572,7 @@ export function extractEntries(lines: ParsedLine[], titles: ParsedTitle[], promp
     if (pm) {
       if (cur) entries.push(cur);
       const cwd = pendingCwd || lastTitleCwd || "";
-      cur = { command: pm[1].trim(), cwd, byte: ln.byte, out: [], output: "", empty: true, noise: false, at: null, dur: null };
+      cur = { command: pm[1].trim(), cwd, byte: ln.byte, out: [], output: "", empty: true, noise: false, at: null, dur: null, exit: null };
       pendingCwd = null;
       continue;
     }
@@ -485,8 +632,8 @@ export function parseSession(name: string, bytes: Uint8Array, timeText: string |
   const startEpoch = parseWhen(started);
   const endEpoch = parseWhen(done);
   const timing = buildTiming(timeText);
-  const { lines, titles } = replay(body, cols, rows);
-  const entries = extractEntries(lines, titles, promptSrc, cwdSrc);
+  const { lines, titles, marks } = replay(body, cols, rows);
+  const entries = extractEntries(lines, titles, marks, promptSrc, cwdSrc);
 
   for (const e of entries) {
     if (timing && startEpoch != null) e.at = new Date(startEpoch + timing(e.byte) * 1000);

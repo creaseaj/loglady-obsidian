@@ -231,6 +231,7 @@ export class LogLadyView extends ItemView {
     const meta: string[] = [];
     if (e.cwd) meta.push(e.cwd);
     if (e.dur != null && e.dur > 0) meta.push("took " + fmtDur(e.dur));
+    if (e.exit != null) meta.push("exit " + e.exit);
     if (meta.length) peek.createDiv({ cls: "loglady-peek-meta", text: meta.join(" · ") });
     if (e.output.trim()) peek.createEl("pre", { text: e.output });
     else peek.createDiv({ cls: "loglady-hint", text: "No output captured for this command." });

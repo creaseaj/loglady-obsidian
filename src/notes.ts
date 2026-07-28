@@ -64,6 +64,7 @@ export function commandMarkdown(e: CommandEntry): string {
   if (e.cwd) meta.push("cwd `" + e.cwd + "`");
   if (e.at) meta.push(fmtTime(e.at));
   if (e.dur != null && e.dur > 0) meta.push("took " + fmtDur(e.dur));
+  if (e.exit) meta.push("exit " + e.exit);
   if (meta.length) L.push("*" + meta.join(" · ") + "*", "");
   if (e.output && e.output.trim()) { L.push("```"); L.push(e.output.replace(/\s+$/, "")); L.push("```", ""); }
   return L.join("\n").trimEnd() + "\n";
@@ -80,6 +81,7 @@ export function commandNote(e: CommandEntry, sessionName: string, indexNoteName:
   if (e.cwd) fm.push("cwd: " + yamlScalar(e.cwd));
   if (e.at) fm.push("at: " + e.at.toISOString());
   if (e.dur != null && e.dur > 0) fm.push("duration_s: " + e.dur.toFixed(2));
+  if (e.exit != null) fm.push("exit: " + e.exit);
   fm.push("---", "");
 
   const nb: string[] = [];
@@ -89,6 +91,7 @@ export function commandNote(e: CommandEntry, sessionName: string, indexNoteName:
   if (e.cwd) meta.push("cwd `" + e.cwd + "`");
   if (e.at) meta.push(fmtTime(e.at));
   if (e.dur != null && e.dur > 0) meta.push("took " + fmtDur(e.dur));
+  if (e.exit) meta.push("exit " + e.exit);
   if (meta.length) nb.push("*" + meta.join(" · ") + "*", "");
   if (e.output && e.output.trim()) { nb.push("```"); nb.push(e.output.replace(/\s+$/, "")); nb.push("```", ""); }
 
