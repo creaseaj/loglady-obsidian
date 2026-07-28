@@ -1,6 +1,6 @@
 {
   "name": "loglady-obsidian",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Import script(1) terminal session recordings as clean, linked Obsidian notes.",
   "main": "main.js",
   "type": "module",
