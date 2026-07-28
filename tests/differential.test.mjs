@@ -87,6 +87,24 @@ const AGREE = {
   "top-style partial clears": `${ESC}[H${ESC}[2Jheader\r\nrow1\r\n${ESC}[H${ESC}[Jheader\r\nrow2\r\n`,
   "wide characters (CJK)": "日本語テキスト\r\nnext\r\n",
   "combining marks": "éclair\r\n",
+
+  // Sequences carrying intermediate bytes, sub-parameters, or string payloads.
+  // Each of these used to spill part of itself into the text as literal
+  // characters, which is the failure mode that actually reaches a note.
+  "cursor style (CSI SP q)": `${ESC}[2 qprompt $ ls\r\n`,
+  "other CSI intermediates (DECSCA)": `${ESC}[1"qtext\r\n`,
+  "soft reset (CSI ! p)": `${ESC}[!ptext\r\n`,
+  "SGR with colon sub-parameters": `${ESC}[38:2::255:0:0mred${ESC}[0m\r\n`,
+  "DCS sixel graphics": `before\r\n${ESC}Pq#0;2;0;0;0#0~~@@vv@@~~@@~~$${ESC}\\after\r\n`,
+  "DCS DECRQSS reply": `before\r\n${ESC}P1$r0;1m${ESC}\\after\r\n`,
+  "APC string (kitty graphics)": `before\r\n${ESC}_Ga=T,f=100;base64data${ESC}\\after\r\n`,
+  "PM string": `before\r\n${ESC}^privmsg${ESC}\\after\r\n`,
+  "DEC line drawing charset": `${ESC}(0lqqqk${ESC}(B\r\nplain\r\n`,
+  "REP repeat last character (CSI b)": `a${ESC}[5b\r\n`,
+  "HPA / VPA absolute positioning": `${ESC}[10\`X${ESC}[3dY\r\n`,
+  "device status report request": `${ESC}[6ntext\r\n`,
+  "window manipulation (CSI t)": `${ESC}[8;24;80ttext\r\n`,
+  "bracketed paste markers": `${ESC}[200~pasted text${ESC}[201~\r\n`,
 };
 
 for (const [name, body] of Object.entries(AGREE)) {
@@ -121,4 +139,23 @@ test("divergence: an explicit scroll-up keeps the lines it scrolls past", async 
   const bytes = enc(`a\r\nb\r\nc\r\n${ESC}[2Sd\r\n`);
   assert.ok(ours(bytes).includes("a"), "the scrolled-off line stays in our history");
   assert.ok(!(await theirs(bytes)).includes("a"), "xterm.js drops it");
+});
+
+test("divergence: a full reset (RIS) keeps what was on screen", async () => {
+  // Same principle again: ESC c wipes the display, but the commands above it
+  // are session history, not screen state.
+  const bytes = enc(`junk\r\n${ESC}cafter reset\r\n`);
+  assert.deepEqual(ours(bytes), ["junk", "after reset"]);
+  assert.deepEqual(await theirs(bytes), ["after reset"]);
+});
+
+test("known simplification: tmux's DCS passthrough payload is dropped", async () => {
+  // xterm.js special-cases `DCS tmux; ... ST` and replays the wrapped payload
+  // as if it had arrived directly. Every other DCS flavour (sixel, DECRQSS) is
+  // consumed by both engines and asserted above; this one only shows up in
+  // recordings made inside tmux with a passthrough-emitting integration, so it
+  // stays a documented gap rather than a special case in the emulator.
+  const bytes = enc(`before\r\n${ESC}Ptmux;${ESC}[31mpayload${ESC}\\after\r\n`);
+  assert.deepEqual(ours(bytes), ["before", "after"]);
+  assert.deepEqual(await theirs(bytes), ["before", "payloadafter"]);
 });

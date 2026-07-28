@@ -55,6 +55,12 @@ export interface ParsedSession {
   entries: CommandEntry[];
 }
 
+/** DEC special graphics, ASCII 0x5f-0x7e in order — the VT100 box-drawing set. */
+const DEC_GRAPHICS = [
+  " ", "◆", "▒", "␉", "␌", "␍", "␊", "°", "±", "␤", "␋", "┘", "┐", "┌", "└", "┼",
+  "⎺", "⎻", "─", "⎼", "⎽", "├", "┤", "┴", "┬", "│", "≤", "≥", "π", "≠", "£", "·",
+];
+
 export const DEFAULT_PROMPT_RE = String.raw`└─[$#]\s?(.*)$`;
 export const DEFAULT_CWD_RE = String.raw`┌──\(.*?\)-\[(.*?)\]`;
 
@@ -86,6 +92,8 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   let savedCursor: { cx: number; cy: number } | null = null;
   let insertMode = false; // IRM (CSI 4h): typed cells shift the rest of the row right
   let autowrap = true;    // DECAWM (CSI ?7l off): writes past the last column overwrite it
+  let g0Graphics = false; // ESC ( 0: DEC special graphics designated into G0
+  let lastPrinted = -1;   // for REP (CSI b)
 
   function commit(row: string[], wrapped: boolean, byte: number) {
     if (inAlt) return;
@@ -163,7 +171,11 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   function put(cp: number) {
     if (pendingWrap) { wrap[cy] = true; cx = 0; lf(); pendingWrap = false; }
     if (insertMode) for (let x = cols - 1; x > cx; x--) grid[cy][x] = grid[cy][x - 1];
-    grid[cy][cx] = String.fromCodePoint(cp); cx++;
+    // With DEC special graphics designated (ESC ( 0), ASCII in 0x5f-0x7e maps
+    // to the box-drawing set — the difference between "lqqqk" and "┌───┐".
+    const ch = g0Graphics && cp >= 0x5f && cp <= 0x7e ? DEC_GRAPHICS[cp - 0x5f] : String.fromCodePoint(cp);
+    grid[cy][cx] = ch; cx++;
+    lastPrinted = cp;
     if (cx >= cols) { cx = cols - 1; pendingWrap = autowrap; }
   }
 
@@ -176,15 +188,21 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
       const nx = bytes[i + 1];
       if (nx === 0x5b) { // CSI '['
         moveCancelsWrap();
-        let j = i + 2, params = "";
-        while (j < n) {
-          const c = bytes[j];
-          if ((c >= 0x30 && c <= 0x39) || c === 0x3b || c === 0x3f) { params += String.fromCharCode(c); j++; }
-          else break;
-        }
-        const fin = bytes[j];
+        // Parameter bytes are 0x30-0x3f (digits, ';', ':', '?', '<', '=', '>')
+        // and intermediates 0x20-0x2f, per ECMA-48. Stopping early on either
+        // used to leave the sequence's final letter behind as literal text --
+        // `ESC[2 q`, the cursor-shape setter shells emit on every prompt,
+        // deposited a stray "q", and colon-form SGR (ESC[38:2::255:0:0m) spilled
+        // its whole colour spec into the reconstruction.
+        let j = i + 2, params = "", inter = "";
+        while (j < n && bytes[j] >= 0x30 && bytes[j] <= 0x3f) { params += String.fromCharCode(bytes[j]); j++; }
+        while (j < n && bytes[j] >= 0x20 && bytes[j] <= 0x2f) { inter += String.fromCharCode(bytes[j]); j++; }
+        const fin = inter ? -1 : bytes[j]; // an intermediate means a sequence we don't act on
         const priv = params.charAt(0) === "?";
-        const ps = (priv ? params.slice(1) : params).split(";").map(s => (s === "" ? 0 : parseInt(s, 10)));
+        const ps = (priv ? params.slice(1) : params)
+          .split(";")
+          .map(s => s.split(":")[0]) // colon sub-parameters: the leading value is the one we'd use
+          .map(s => (s === "" ? 0 : parseInt(s, 10)));
         const p0 = ps[0] || 0;
         switch (fin) {
           case 0x41: cy = Math.max(0, cy - (p0 || 1)); break; // A up
@@ -193,7 +211,10 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
           case 0x44: cx = Math.max(0, cx - (p0 || 1)); break; // D left
           case 0x45: cx = 0; cy = Math.min(rows - 1, cy + (p0 || 1)); break; // E
           case 0x46: cx = 0; cy = Math.max(0, cy - (p0 || 1)); break; // F
-          case 0x47: cx = Math.max(0, Math.min(cols - 1, (p0 || 1) - 1)); break; // G col
+          case 0x47: case 0x60: cx = Math.max(0, Math.min(cols - 1, (p0 || 1) - 1)); break; // G/` column absolute
+          case 0x61: cx = Math.min(cols - 1, cx + (p0 || 1)); break; // a column relative
+          case 0x65: cy = Math.min(rows - 1, cy + (p0 || 1)); break; // e row relative
+          case 0x62: { const k = p0 || 1; for (let r = 0; r < k && lastPrinted >= 0; r++) put(lastPrinted); break; } // b repeat
           case 0x64: cy = Math.max(0, Math.min(rows - 1, (p0 || 1) - 1)); break; // d row
           case 0x48: case 0x66: // H/f pos
             cy = Math.max(0, Math.min(rows - 1, (ps[0] || 1) - 1));
@@ -258,6 +279,24 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
           default: break; // m (SGR) etc: ignore — no colour tracking here
         }
         i = j + 1; continue;
+      } else if (nx === 0x50 || nx === 0x5f || nx === 0x5e || nx === 0x58) {
+        // DCS / APC / PM / SOS: string sequences whose payload is for the
+        // terminal, never for display (tmux passthrough, kitty graphics,
+        // status strings). Skipping only the two-byte introducer printed the
+        // whole payload as text. Consume to the string terminator.
+        let j = i + 2;
+        const cap = Math.min(n, i + 65536);
+        while (j < cap && bytes[j] !== 0x07 && !(bytes[j] === 0x1b && bytes[j + 1] === 0x5c)) j++;
+        if (bytes[j] === 0x07) i = j + 1;
+        else if (bytes[j] === 0x1b) i = j + 2;
+        else i += 2; // unterminated: fall back to treating it as a stray escape
+        continue;
+      } else if (nx === 0x63) { // c RIS full reset
+        commitScreen();
+        clearScreen();
+        cx = 0; cy = 0; top = 0; bot = rows - 1;
+        insertMode = false; autowrap = true; g0Graphics = false; savedCursor = null;
+        i += 2; continue;
       } else if (nx === 0x5d) { // OSC ']'
         // Bounded scan: an ESC ] that never terminates (a stray escape in
         // binary output, say) used to swallow the entire rest of the file.
@@ -275,7 +314,10 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
       else if (nx === 0x45) { cx = 0; lf(); pendingWrap = false; i += 2; continue; } // E next line
       else if (nx === 0x4d) { ri(); pendingWrap = false; i += 2; continue; } // M reverse index
       else if (nx === 0x3d || nx === 0x3e) { i += 2; continue; } // = > keypad modes
-      else if (nx === 0x28 || nx === 0x29 || nx === 0x2a || nx === 0x2b) { i += 3; continue; } // charset ( ) * +
+      else if (nx === 0x28 || nx === 0x29 || nx === 0x2a || nx === 0x2b) { // charset ( ) * +
+        if (nx === 0x28) g0Graphics = bytes[i + 2] === 0x30; // ESC ( 0 selects DEC special graphics
+        i += 3; continue;
+      }
       else { i += 2; continue; }
     }
     if (b === 0x0d) { cx = 0; moveCancelsWrap(); i++; continue; } // CR
