@@ -90,3 +90,73 @@ test("replay: CRLF line endings do not duplicate or misplace text", () => {
   const { lines } = replay(bytes, 40, 10);
   assert.deepEqual(lines.map(l => l.text), ["first", "second", "third"]);
 });
+
+/* --------------------------------------------------------------------------
+ * Synthetic sessions, for the paths a small fixture can't cover.
+ * ------------------------------------------------------------------------ */
+const SH_PROMPT = String.raw`^sh-5\.1\$\s?(.*)$`;
+
+function syntheticSession(body, { rows = 30, cols = 120 } = {}) {
+  const text =
+    `Script started on 2026-01-05 10:00:00-05:00 [TERM="xterm-256color" TTY="/dev/pts/3" COLUMNS="${cols}" LINES="${rows}"]\r\n` +
+    body +
+    `Script done on 2026-01-05 10:30:00-05:00 [COMMAND_EXIT_CODE="0"]\r\n`;
+  return parseSession("t_shell.log", new TextEncoder().encode(text), null, SH_PROMPT, "");
+}
+
+function commandBlocks(n, { clearEvery = 0, from = 1 } = {}) {
+  let s = "";
+  for (let i = from; i < from + n; i++) {
+    s += `sh-5.1$ echo cmd-${i}\r\ncmd-${i}\r\n`;
+    if (clearEvery && (i - from + 1) % clearEvery === 0) s += "\x1b[H\x1b[2J\x1b[3J"; // what `clear` emits
+  }
+  return s;
+}
+
+test("clear does not discard commands still on screen", () => {
+  // Every line that hasn't scrolled off when `clear` runs used to be wiped
+  // without ever reaching the reconstruction, taking whole commands with it.
+  const s = syntheticSession(commandBlocks(100, { clearEvery: 25 }));
+  const kept = s.entries.map(e => e.command).filter(c => c.startsWith("echo cmd-"));
+  assert.equal(kept.length, 100, "every command survives the clears");
+  assert.equal(kept[0], "echo cmd-1", "the oldest command is still there");
+  assert.equal(kept[99], "echo cmd-100");
+});
+
+test("clear preserves each command's own output", () => {
+  const s = syntheticSession(commandBlocks(40, { clearEvery: 7 }));
+  const e = s.entries.find(x => x.command === "echo cmd-3");
+  assert.equal(e.output, "cmd-3", "output stays attached to its command across a clear");
+});
+
+test("full-screen programs on the alternate screen stay out of the history", () => {
+  // vim/htop/less draw on the alternate buffer (DECSET 1049) and restore the
+  // shell's screen on exit; their frames are not session history.
+  const tui =
+    "sh-5.1$ vim notes.txt\r\n" +
+    "\x1b[?1049h" +
+    "~ VIM FRAME LINE A\r\n~ VIM FRAME LINE B\r\n" +
+    "\x1b[H\x1b[2J" +                       // a redraw inside the TUI
+    "~ VIM FRAME LINE C\r\n" +
+    "\x1b[?1049l";
+  const s = syntheticSession(commandBlocks(2) + tui + commandBlocks(2, { from: 3 }));
+  const cmds = s.entries.map(e => e.command);
+  assert.deepEqual(cmds, ["echo cmd-1", "echo cmd-2", "vim notes.txt", "echo cmd-3", "echo cmd-4"]);
+  const all = s.entries.map(e => e.output).join("\n");
+  assert.ok(!all.includes("VIM FRAME"), "no alternate-screen frames leak into any command's output");
+});
+
+test("an unterminated OSC does not swallow the rest of the session", () => {
+  // A stray ESC ] in binary output used to consume every byte after it.
+  const s = syntheticSession(
+    commandBlocks(2) + "sh-5.1$ cat blob.bin\r\n\x1b]0;never terminated\r\n" + commandBlocks(2, { from: 3 })
+  );
+  const cmds = s.entries.map(e => e.command);
+  assert.ok(cmds.includes("echo cmd-3"), "commands after the stray escape survive");
+  assert.ok(cmds.includes("echo cmd-4"));
+});
+
+test("a well-formed OSC title still sets the working directory", () => {
+  const s = syntheticSession("\x1b]0;user@kali: /var/log\x07sh-5.1$ echo cmd-1\r\ncmd-1\r\n");
+  assert.equal(s.entries[0].cwd, "/var/log");
+});

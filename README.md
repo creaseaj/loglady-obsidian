@@ -51,7 +51,11 @@ work, rather than a one-shot dialog. In the panel you can:
 
 The raw typescript is full of cursor-movement, tab-completion, and colour
 escape codes — a small built-in terminal emulator replays it to reconstruct
-just the clean visible text before anything is imported.
+just the clean visible text before anything is imported. Running `clear`
+mid-session doesn't cost you the commands above it (they go to the emulator's
+scrollback, the way a real terminal would), and full-screen programs like
+`vim`, `less` or `htop` draw on the alternate screen, so their frames stay out
+of the imported output.
 
 Notes created here use the same frontmatter shape as `loglady.html`'s
 "Download Obsidian Vault" export, so a single Dataview query works across

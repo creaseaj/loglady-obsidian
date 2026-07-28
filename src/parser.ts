@@ -75,8 +75,51 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   const titles: ParsedTitle[] = [];
 
   let pos = 0;
+  // Alternate screen buffer (DECSET 1049/1047/47): full-screen programs draw
+  // there and restore the shell's screen on exit. Nothing drawn while it is
+  // active belongs in the session history, so commits are dropped until the
+  // program leaves it.
+  let inAlt = false;
+  let savedScreen: { grid: string[][]; wrap: boolean[]; rowByte: number[]; cx: number; cy: number } | null = null;
+
   function commit(row: string[], wrapped: boolean, byte: number) {
+    if (inAlt) return;
     out.push({ row, wrapped, byte });
+  }
+  /**
+   * Push the visible screen into history, trailing blank rows dropped.
+   *
+   * A full erase — what `clear` sends as ESC[H ESC[2J ESC[3J — would otherwise
+   * destroy every line that hasn't scrolled off yet, silently dropping the most
+   * recent commands from the reconstruction. A real terminal moves them to
+   * scrollback; `out` is our scrollback, so they go there before the blanking.
+   *
+   * A program that erases and then redraws the same screen in the *primary*
+   * buffer will duplicate those lines here. That is rare outside full-screen
+   * apps, and those live on the alternate screen, where commit() drops them.
+   */
+  function commitScreen() {
+    let last = -1;
+    for (let y = 0; y < rows; y++) if (grid[y].join("").trim() !== "") last = y;
+    for (let y = 0; y <= last; y++) commit(grid[y], wrap[y], rowByte[y]);
+  }
+  function clearScreen() {
+    for (let y = 0; y < rows; y++) { grid[y] = blank(); wrap[y] = false; rowByte[y] = pos; }
+    pendingWrap = false;
+  }
+  function enterAlt() {
+    if (inAlt) return;
+    savedScreen = { grid, wrap, rowByte, cx, cy };
+    grid = Array.from({ length: rows }, blank);
+    wrap = Array(rows).fill(false);
+    rowByte = Array(rows).fill(pos);
+    cx = 0; cy = 0; pendingWrap = false;
+    inAlt = true;
+  }
+  function leaveAlt() {
+    if (!inAlt || !savedScreen) return;
+    ({ grid, wrap, rowByte, cx, cy } = savedScreen);
+    savedScreen = null; inAlt = false; pendingWrap = false;
   }
   function scrollUp() {
     commit(grid[0], wrap[0], rowByte[0]);
@@ -126,9 +169,19 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
             break;
           case 0x4a: { // J erase display
             const m = p0;
+            // Partial erases (0/1) are prompt and redraw bookkeeping around
+            // content that is still on screen — committing there would double
+            // lines up, so only the full erase flushes to history.
             if (m === 0) { for (let x = cx; x < cols; x++) grid[cy][x] = " "; for (let y = cy + 1; y < rows; y++) { grid[y] = blank(); wrap[y] = false; } }
             else if (m === 1) { for (let x = 0; x <= cx; x++) grid[cy][x] = " "; for (let y = 0; y < cy; y++) { grid[y] = blank(); wrap[y] = false; } }
-            else { for (let y = 0; y < rows; y++) { grid[y] = blank(); wrap[y] = false; } }
+            else if (m === 3) { /* erase saved lines: `out` is that scrollback, and it is the whole point here — keep it */ }
+            else { commitScreen(); clearScreen(); }
+            break;
+          }
+          case 0x68: case 0x6c: { // h/l set/reset mode
+            if (priv && (p0 === 1049 || p0 === 1047 || p0 === 47)) {
+              if (fin === 0x68) enterAlt(); else leaveAlt();
+            }
             break;
           }
           case 0x4b: { // K erase line
@@ -145,10 +198,16 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
         }
         i = j + 1; continue;
       } else if (nx === 0x5d) { // OSC ']'
+        // Bounded scan: an ESC ] that never terminates (a stray escape in
+        // binary output, say) used to swallow the entire rest of the file.
+        // A real OSC string carries no newline, so one ends the scan.
         let j = i + 2, s = "";
-        while (j < n && bytes[j] !== 0x07 && !(bytes[j] === 0x1b && bytes[j + 1] === 0x5c)) { s += String.fromCharCode(bytes[j]); j++; }
-        titles.push({ text: s, byte: i });
-        i = bytes[j] === 0x07 ? j + 1 : j + 2; continue;
+        const cap = Math.min(n, i + 4096);
+        while (j < cap && bytes[j] !== 0x07 && bytes[j] !== 0x0a && bytes[j] !== 0x0d && !(bytes[j] === 0x1b && bytes[j + 1] === 0x5c)) { s += String.fromCharCode(bytes[j]); j++; }
+        if (bytes[j] === 0x07) { titles.push({ text: s, byte: i }); i = j + 1; }
+        else if (bytes[j] === 0x1b && bytes[j + 1] === 0x5c) { titles.push({ text: s, byte: i }); i = j + 2; }
+        else i += 2; // unterminated: treat as a stray escape and keep parsing
+        continue;
       } else if (nx === 0x3d || nx === 0x3e || nx === 0x37 || nx === 0x38) { i += 2; continue; } // = > 7 8
       else if (nx === 0x28 || nx === 0x29 || nx === 0x2a || nx === 0x2b) { i += 3; continue; } // charset ( ) * +
       else { i += 2; continue; }
@@ -165,6 +224,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
     if (len > 1 && cp < 0x20) { cp = 0xFFFD; }
     put(cp); i += len;
   }
+  if (inAlt) leaveAlt(); // session ended inside a full-screen program
   for (let y = 0; y < rows; y++) commit(grid[y], wrap[y], rowByte[y]);
 
   const lines: ParsedLine[] = [];
