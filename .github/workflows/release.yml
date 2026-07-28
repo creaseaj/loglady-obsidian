@@ -1,9 +1,16 @@
 name: Release Obsidian plugin
 
 on:
+    # Tag push (CLI: `git tag 0.1.1 && git push origin 0.1.1`) builds and opens
+    # a fresh draft release with the assets attached.
     push:
         tags:
             - '*'
+    # Publishing a release in the GitHub UI creates the tag but not the assets;
+    # this run uploads them to that same release. The two triggers converge on
+    # the "Attach plugin assets" step, which creates-or-uploads either way.
+    release:
+        types: [published]
 
 jobs:
     build:
@@ -36,13 +43,22 @@ jobs:
                       main.js
                       styles.css
 
-            - name: Create release
+            - name: Attach plugin assets
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
-                  tag="${GITHUB_REF#refs/tags/}"
+                  # release event -> the published release's tag; tag push -> the ref.
+                  tag="${{ github.event.release.tag_name }}"
+                  [ -z "$tag" ] && tag="${GITHUB_REF#refs/tags/}"
 
-                  gh release create "$tag" \
-                    --title="$tag" \
-                    --draft \
-                    main.js manifest.json styles.css
+                  # Upload to an existing release (UI-published), otherwise open a
+                  # fresh draft (tag pushed with no release yet). --clobber lets a
+                  # re-run replace assets instead of failing on duplicates.
+                  if gh release view "$tag" >/dev/null 2>&1; then
+                      gh release upload "$tag" main.js manifest.json styles.css --clobber
+                  else
+                      gh release create "$tag" \
+                        --title="$tag" \
+                        --draft \
+                        main.js manifest.json styles.css
+                  fi
