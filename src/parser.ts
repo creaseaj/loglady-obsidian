@@ -55,6 +55,12 @@ export interface ParsedSession {
   entries: CommandEntry[];
 }
 
+/** DEC special graphics, ASCII 0x5f-0x7e in order — the VT100 box-drawing set. */
+const DEC_GRAPHICS = [
+  " ", "◆", "▒", "␉", "␌", "␍", "␊", "°", "±", "␤", "␋", "┘", "┐", "┌", "└", "┼",
+  "⎺", "⎻", "─", "⎼", "⎽", "├", "┤", "┴", "┬", "│", "≤", "≥", "π", "≠", "£", "·",
+];
+
 export const DEFAULT_PROMPT_RE = String.raw`└─[$#]\s?(.*)$`;
 export const DEFAULT_CWD_RE = String.raw`┌──\(.*?\)-\[(.*?)\]`;
 
@@ -75,21 +81,110 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   const titles: ParsedTitle[] = [];
 
   let pos = 0;
+  // Alternate screen buffer (DECSET 1049/1047/47): full-screen programs draw
+  // there and restore the shell's screen on exit. Nothing drawn while it is
+  // active belongs in the session history, so commits are dropped until the
+  // program leaves it.
+  let inAlt = false;
+  let savedScreen: { grid: string[][]; wrap: boolean[]; rowByte: number[]; cx: number; cy: number; top: number; bot: number } | null = null;
+  // Scroll region (DECSTBM) margins, and the DECSC/DECRC cursor save slot.
+  let top = 0, bot = rows - 1;
+  let savedCursor: { cx: number; cy: number } | null = null;
+  let insertMode = false; // IRM (CSI 4h): typed cells shift the rest of the row right
+  let autowrap = true;    // DECAWM (CSI ?7l off): writes past the last column overwrite it
+  let g0Graphics = false; // ESC ( 0: DEC special graphics designated into G0
+  let lastPrinted = -1;   // for REP (CSI b)
+
   function commit(row: string[], wrapped: boolean, byte: number) {
+    if (inAlt) return;
     out.push({ row, wrapped, byte });
   }
-  function scrollUp() {
-    commit(grid[0], wrap[0], rowByte[0]);
-    grid.shift(); grid.push(blank());
-    wrap.shift(); wrap.push(false);
-    rowByte.shift(); rowByte.push(pos);
+  /**
+   * Push the visible screen into history, trailing blank rows dropped.
+   *
+   * A full erase — what `clear` sends as ESC[H ESC[2J ESC[3J — would otherwise
+   * destroy every line that hasn't scrolled off yet, silently dropping the most
+   * recent commands from the reconstruction. A real terminal moves them to
+   * scrollback; `out` is our scrollback, so they go there before the blanking.
+   *
+   * A program that erases and then redraws the same screen in the *primary*
+   * buffer will duplicate those lines here. That is rare outside full-screen
+   * apps, and those live on the alternate screen, where commit() drops them.
+   */
+  function commitScreen() {
+    let last = -1;
+    for (let y = 0; y < rows; y++) if (grid[y].join("").trim() !== "") last = y;
+    for (let y = 0; y <= last; y++) commit(grid[y], wrap[y], rowByte[y]);
   }
-  function lf() { cy++; if (cy >= rows) { cy = rows - 1; scrollUp(); } rowByte[cy] = pos; }
+  function clearScreen() {
+    for (let y = 0; y < rows; y++) { grid[y] = blank(); wrap[y] = false; rowByte[y] = pos; }
+    pendingWrap = false;
+  }
+  function enterAlt() {
+    if (inAlt) return;
+    savedScreen = { grid, wrap, rowByte, cx, cy, top, bot };
+    grid = Array.from({ length: rows }, blank);
+    wrap = Array(rows).fill(false);
+    rowByte = Array(rows).fill(pos);
+    cx = 0; cy = 0; pendingWrap = false;
+    top = 0; bot = rows - 1;
+    inAlt = true;
+  }
+  function leaveAlt() {
+    if (!inAlt || !savedScreen) return;
+    ({ grid, wrap, rowByte, cx, cy, top, bot } = savedScreen);
+    savedScreen = null; inAlt = false; pendingWrap = false;
+  }
+  /**
+   * Scroll the margin region up, the way a line feed at the bottom margin does.
+   * Only a full-screen scroll feeds history: when a program has set a smaller
+   * region it is animating a viewport (a pager's text area), and those rows are
+   * frames, not session output — the same reason alternate-screen writes never
+   * reach `out`.
+   */
+  function scrollRegionUp(k = 1) {
+    for (let i = 0; i < k; i++) {
+      if (top === 0 && bot === rows - 1) commit(grid[top], wrap[top], rowByte[top]);
+      grid.splice(top, 1); grid.splice(bot, 0, blank());
+      wrap.splice(top, 1); wrap.splice(bot, 0, false);
+      rowByte.splice(top, 1); rowByte.splice(bot, 0, pos);
+    }
+  }
+  function scrollRegionDown(k = 1) {
+    for (let i = 0; i < k; i++) {
+      grid.splice(bot, 1); grid.splice(top, 0, blank());
+      wrap.splice(bot, 1); wrap.splice(top, 0, false);
+      rowByte.splice(bot, 1); rowByte.splice(top, 0, pos);
+    }
+  }
+  function lf() {
+    if (cy === bot) scrollRegionUp(1);
+    else if (cy < rows - 1) cy++;
+    rowByte[cy] = pos;
+  }
+  /** Reverse index (ESC M): up a line, scrolling the region down at the top margin. */
+  function ri() {
+    if (cy === top) scrollRegionDown(1);
+    else if (cy > 0) cy--;
+  }
   function moveCancelsWrap() { pendingWrap = false; }
+  /**
+   * Break the continuation link *into* row y — `wrap[y-1]` says row y-1 flows
+   * into row y, which is xterm's `isWrapped` flag living on row y itself.
+   * Erasing or displacing row y invalidates it. Missing this glued a shell's
+   * command line onto the prompt banner redrawn beneath it, and swallowed the
+   * banner line the working-directory regex reads.
+   */
+  function breakIncoming(y: number) { if (y > 0) wrap[y - 1] = false; }
   function put(cp: number) {
     if (pendingWrap) { wrap[cy] = true; cx = 0; lf(); pendingWrap = false; }
-    grid[cy][cx] = String.fromCodePoint(cp); cx++;
-    if (cx >= cols) { cx = cols - 1; pendingWrap = true; }
+    if (insertMode) for (let x = cols - 1; x > cx; x--) grid[cy][x] = grid[cy][x - 1];
+    // With DEC special graphics designated (ESC ( 0), ASCII in 0x5f-0x7e maps
+    // to the box-drawing set — the difference between "lqqqk" and "┌───┐".
+    const ch = g0Graphics && cp >= 0x5f && cp <= 0x7e ? DEC_GRAPHICS[cp - 0x5f] : String.fromCodePoint(cp);
+    grid[cy][cx] = ch; cx++;
+    lastPrinted = cp;
+    if (cx >= cols) { cx = cols - 1; pendingWrap = autowrap; }
   }
 
   const n = bytes.length;
@@ -101,15 +196,21 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
       const nx = bytes[i + 1];
       if (nx === 0x5b) { // CSI '['
         moveCancelsWrap();
-        let j = i + 2, params = "";
-        while (j < n) {
-          const c = bytes[j];
-          if ((c >= 0x30 && c <= 0x39) || c === 0x3b || c === 0x3f) { params += String.fromCharCode(c); j++; }
-          else break;
-        }
-        const fin = bytes[j];
+        // Parameter bytes are 0x30-0x3f (digits, ';', ':', '?', '<', '=', '>')
+        // and intermediates 0x20-0x2f, per ECMA-48. Stopping early on either
+        // used to leave the sequence's final letter behind as literal text --
+        // `ESC[2 q`, the cursor-shape setter shells emit on every prompt,
+        // deposited a stray "q", and colon-form SGR (ESC[38:2::255:0:0m) spilled
+        // its whole colour spec into the reconstruction.
+        let j = i + 2, params = "", inter = "";
+        while (j < n && bytes[j] >= 0x30 && bytes[j] <= 0x3f) { params += String.fromCharCode(bytes[j]); j++; }
+        while (j < n && bytes[j] >= 0x20 && bytes[j] <= 0x2f) { inter += String.fromCharCode(bytes[j]); j++; }
+        const fin = inter ? -1 : bytes[j]; // an intermediate means a sequence we don't act on
         const priv = params.charAt(0) === "?";
-        const ps = (priv ? params.slice(1) : params).split(";").map(s => (s === "" ? 0 : parseInt(s, 10)));
+        const ps = (priv ? params.slice(1) : params)
+          .split(";")
+          .map(s => s.split(":")[0]) // colon sub-parameters: the leading value is the one we'd use
+          .map(s => (s === "" ? 0 : parseInt(s, 10)));
         const p0 = ps[0] || 0;
         switch (fin) {
           case 0x41: cy = Math.max(0, cy - (p0 || 1)); break; // A up
@@ -118,7 +219,10 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
           case 0x44: cx = Math.max(0, cx - (p0 || 1)); break; // D left
           case 0x45: cx = 0; cy = Math.min(rows - 1, cy + (p0 || 1)); break; // E
           case 0x46: cx = 0; cy = Math.max(0, cy - (p0 || 1)); break; // F
-          case 0x47: cx = Math.max(0, Math.min(cols - 1, (p0 || 1) - 1)); break; // G col
+          case 0x47: case 0x60: cx = Math.max(0, Math.min(cols - 1, (p0 || 1) - 1)); break; // G/` column absolute
+          case 0x61: cx = Math.min(cols - 1, cx + (p0 || 1)); break; // a column relative
+          case 0x65: cy = Math.min(rows - 1, cy + (p0 || 1)); break; // e row relative
+          case 0x62: { const k = p0 || 1; for (let r = 0; r < k && lastPrinted >= 0; r++) put(lastPrinted); break; } // b repeat
           case 0x64: cy = Math.max(0, Math.min(rows - 1, (p0 || 1) - 1)); break; // d row
           case 0x48: case 0x66: // H/f pos
             cy = Math.max(0, Math.min(rows - 1, (ps[0] || 1) - 1));
@@ -126,31 +230,110 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
             break;
           case 0x4a: { // J erase display
             const m = p0;
-            if (m === 0) { for (let x = cx; x < cols; x++) grid[cy][x] = " "; for (let y = cy + 1; y < rows; y++) { grid[y] = blank(); wrap[y] = false; } }
-            else if (m === 1) { for (let x = 0; x <= cx; x++) grid[cy][x] = " "; for (let y = 0; y < cy; y++) { grid[y] = blank(); wrap[y] = false; } }
-            else { for (let y = 0; y < rows; y++) { grid[y] = blank(); wrap[y] = false; } }
+            // Partial erases (0/1) are prompt and redraw bookkeeping around
+            // content that is still on screen — committing there would double
+            // lines up, so only the full erase flushes to history.
+            if (m === 0) {
+              for (let x = cx; x < cols; x++) grid[cy][x] = " ";
+              wrap[cy] = false;
+              if (cx === 0) breakIncoming(cy);
+              for (let y = cy + 1; y < rows; y++) { grid[y] = blank(); wrap[y] = false; }
+            } else if (m === 1) {
+              for (let x = 0; x <= cx; x++) grid[cy][x] = " ";
+              breakIncoming(cy);
+              for (let y = 0; y < cy; y++) { grid[y] = blank(); wrap[y] = false; }
+            }
+            else if (m === 3) { /* erase saved lines: `out` is that scrollback, and it is the whole point here — keep it */ }
+            else { commitScreen(); clearScreen(); }
+            break;
+          }
+          case 0x68: case 0x6c: { // h/l set/reset mode
+            const set = fin === 0x68;
+            if (priv && (p0 === 1049 || p0 === 1047 || p0 === 47)) { if (set) enterAlt(); else leaveAlt(); }
+            else if (priv && p0 === 7) autowrap = set; // DECAWM
+            else if (!priv && p0 === 4) insertMode = set; // IRM
             break;
           }
           case 0x4b: { // K erase line
             const m = p0;
-            if (m === 0) { for (let x = cx; x < cols; x++) grid[cy][x] = " "; }
-            else if (m === 1) { for (let x = 0; x <= cx; x++) grid[cy][x] = " "; }
-            else { grid[cy] = blank(); }
-            wrap[cy] = false; break;
+            if (m === 0) { for (let x = cx; x < cols; x++) grid[cy][x] = " "; wrap[cy] = false; if (cx === 0) breakIncoming(cy); }
+            else if (m === 1) { for (let x = 0; x <= cx; x++) grid[cy][x] = " "; breakIncoming(cy); }
+            else { grid[cy] = blank(); wrap[cy] = false; breakIncoming(cy); }
+            break;
           }
           case 0x40: { const k = p0 || 1; for (let x = cols - 1; x >= cx + k; x--) grid[cy][x] = grid[cy][x - k]; for (let x = cx; x < cx + k && x < cols; x++) grid[cy][x] = " "; break; } // @ insert
           case 0x50: { const k = p0 || 1; for (let x = cx; x < cols; x++) grid[cy][x] = (x + k < cols) ? grid[cy][x + k] : " "; break; } // P delete
           case 0x58: { const k = p0 || 1; for (let x = cx; x < cx + k && x < cols; x++) grid[cy][x] = " "; break; } // X erase chars
+          case 0x4c: { // L insert lines
+            if (cy < top || cy > bot) break;
+            const k = Math.min(p0 || 1, bot - cy + 1);
+            for (let i2 = 0; i2 < k; i2++) {
+              grid.splice(bot, 1); grid.splice(cy, 0, blank());
+              wrap.splice(bot, 1); wrap.splice(cy, 0, false);
+              rowByte.splice(bot, 1); rowByte.splice(cy, 0, pos);
+            }
+            breakIncoming(cy); cx = 0; break;
+          }
+          case 0x4d: { // M delete lines
+            if (cy < top || cy > bot) break;
+            const k = Math.min(p0 || 1, bot - cy + 1);
+            for (let i2 = 0; i2 < k; i2++) {
+              grid.splice(cy, 1); grid.splice(bot, 0, blank());
+              wrap.splice(cy, 1); wrap.splice(bot, 0, false);
+              rowByte.splice(cy, 1); rowByte.splice(bot, 0, pos);
+            }
+            breakIncoming(cy); cx = 0; break;
+          }
+          case 0x53: scrollRegionUp(p0 || 1); break; // S scroll up
+          case 0x54: scrollRegionDown(p0 || 1); break; // T scroll down
+          case 0x72: { // r set scrolling region (DECSTBM)
+            if (priv) break; // ?r is a private-mode restore, not a margin set
+            const t = (ps[0] || 1) - 1, b = (ps[1] || rows) - 1;
+            if (t >= 0 && t < b && b < rows) { top = t; bot = b; cx = 0; cy = top; }
+            break;
+          }
           default: break; // m (SGR) etc: ignore — no colour tracking here
         }
         i = j + 1; continue;
+      } else if (nx === 0x50 || nx === 0x5f || nx === 0x5e || nx === 0x58) {
+        // DCS / APC / PM / SOS: string sequences whose payload is for the
+        // terminal, never for display (tmux passthrough, kitty graphics,
+        // status strings). Skipping only the two-byte introducer printed the
+        // whole payload as text. Consume to the string terminator.
+        let j = i + 2;
+        const cap = Math.min(n, i + 65536);
+        while (j < cap && bytes[j] !== 0x07 && !(bytes[j] === 0x1b && bytes[j + 1] === 0x5c)) j++;
+        if (bytes[j] === 0x07) i = j + 1;
+        else if (bytes[j] === 0x1b) i = j + 2;
+        else i += 2; // unterminated: fall back to treating it as a stray escape
+        continue;
+      } else if (nx === 0x63) { // c RIS full reset
+        commitScreen();
+        clearScreen();
+        cx = 0; cy = 0; top = 0; bot = rows - 1;
+        insertMode = false; autowrap = true; g0Graphics = false; savedCursor = null;
+        i += 2; continue;
       } else if (nx === 0x5d) { // OSC ']'
+        // Bounded scan: an ESC ] that never terminates (a stray escape in
+        // binary output, say) used to swallow the entire rest of the file.
+        // A real OSC string carries no newline, so one ends the scan.
         let j = i + 2, s = "";
-        while (j < n && bytes[j] !== 0x07 && !(bytes[j] === 0x1b && bytes[j + 1] === 0x5c)) { s += String.fromCharCode(bytes[j]); j++; }
-        titles.push({ text: s, byte: i });
-        i = bytes[j] === 0x07 ? j + 1 : j + 2; continue;
-      } else if (nx === 0x3d || nx === 0x3e || nx === 0x37 || nx === 0x38) { i += 2; continue; } // = > 7 8
-      else if (nx === 0x28 || nx === 0x29 || nx === 0x2a || nx === 0x2b) { i += 3; continue; } // charset ( ) * +
+        const cap = Math.min(n, i + 4096);
+        while (j < cap && bytes[j] !== 0x07 && bytes[j] !== 0x0a && bytes[j] !== 0x0d && !(bytes[j] === 0x1b && bytes[j + 1] === 0x5c)) { s += String.fromCharCode(bytes[j]); j++; }
+        if (bytes[j] === 0x07) { titles.push({ text: s, byte: i }); i = j + 1; }
+        else if (bytes[j] === 0x1b && bytes[j + 1] === 0x5c) { titles.push({ text: s, byte: i }); i = j + 2; }
+        else i += 2; // unterminated: treat as a stray escape and keep parsing
+        continue;
+      } else if (nx === 0x37) { savedCursor = { cx, cy }; i += 2; continue; } // 7 DECSC save cursor
+      else if (nx === 0x38) { if (savedCursor) ({ cx, cy } = savedCursor); pendingWrap = false; i += 2; continue; } // 8 DECRC restore
+      else if (nx === 0x44) { lf(); pendingWrap = false; i += 2; continue; } // D index
+      else if (nx === 0x45) { cx = 0; lf(); pendingWrap = false; i += 2; continue; } // E next line
+      else if (nx === 0x4d) { ri(); pendingWrap = false; i += 2; continue; } // M reverse index
+      else if (nx === 0x3d || nx === 0x3e) { i += 2; continue; } // = > keypad modes
+      else if (nx === 0x28 || nx === 0x29 || nx === 0x2a || nx === 0x2b) { // charset ( ) * +
+        if (nx === 0x28) g0Graphics = bytes[i + 2] === 0x30; // ESC ( 0 selects DEC special graphics
+        i += 3; continue;
+      }
       else { i += 2; continue; }
     }
     if (b === 0x0d) { cx = 0; moveCancelsWrap(); i++; continue; } // CR
@@ -165,6 +348,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
     if (len > 1 && cp < 0x20) { cp = 0xFFFD; }
     put(cp); i += len;
   }
+  if (inAlt) leaveAlt(); // session ended inside a full-screen program
   for (let y = 0; y < rows; y++) commit(grid[y], wrap[y], rowByte[y]);
 
   const lines: ParsedLine[] = [];
