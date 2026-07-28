@@ -59,7 +59,6 @@ class LogLadySettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "LogLady" });
 
     new Setting(containerEl)
       .setName("Command prompt regex")
