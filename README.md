@@ -102,7 +102,17 @@ npm test          # runs the parsing-engine test suite (node:test)
 `src/parser.ts` is the terminal-emulator/session-parsing engine, ported from
 `loglady.html` and kept dependency-free and Obsidian-API-free on purpose — it
 is unit-tested directly under Node (`tests/parser.test.mjs`) against a small
-synthetic fixture in `tests/fixtures/`, independent of Obsidian. `src/notes.ts`
+synthetic fixture in `tests/fixtures/`, independent of Obsidian.
+
+Hand-rolling a VT emulator is a good way to hand-roll its bugs, so
+`tests/differential.test.mjs` replays the same byte streams through
+[xterm.js](https://xtermjs.org) (`@xterm/headless`) and asserts both engines
+reconstruct identical text. xterm.js is a **dev dependency only** — it never
+enters the shipped bundle, which keeps `main.js` at ~20 KB and keeps the engine
+portable back to `loglady.html`. Two divergences are deliberate and asserted as
+such: a full screen erase (`clear`) and an explicit scroll-up keep the lines a
+screen emulator discards, because this tool reconstructs a session log rather
+than a screen. `src/notes.ts`
 builds the Markdown/YAML-frontmatter note bodies. `src/main.ts` registers the
 view, the ribbon icon/command, and the settings tab. `src/view.ts` is the
 panel itself: ingest, catalog rendering, output peeking, drag-and-drop, the
