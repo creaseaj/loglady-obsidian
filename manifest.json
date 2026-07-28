@@ -1,0 +1,10 @@
+{
+  "id": "loglady",
+  "name": "LogLady",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Import script(1) terminal session recordings (shell + timing logs) as clean command/output pairs — insert at cursor or create linked notes with frontmatter.",
+  "author": "creaseaj",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

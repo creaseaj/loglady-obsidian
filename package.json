@@ -1,0 +1,22 @@
+{
+  "name": "loglady-obsidian",
+  "version": "0.1.0",
+  "description": "Import script(1) terminal session recordings as clean, linked Obsidian notes.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+  },
+  "keywords": ["obsidian-plugin"],
+  "author": "creaseaj",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "builtin-modules": "^5.3.0",
+    "esbuild": "^0.28.1",
+    "obsidian": "^1.13.1",
+    "typescript": "^7.0.2"
+  }
+}

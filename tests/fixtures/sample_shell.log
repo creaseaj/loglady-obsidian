@@ -1,0 +1,9 @@
+Script started on 2026-01-05 10:00:00-05:00 [TERM="xterm-256color" TTY="/dev/pts/3" COLUMNS="120" LINES="30"]
+sh-5.1$ nmap -sV 10.0.0.5
+Starting Nmap 7.94
+22/tcp open  ssh     OpenSSH 8.9
+80/tcp open  http    nginx 1.24
+sh-5.1$ whoami
+tester
+sh-5.1$ exit
+Script done on 2026-01-05 10:00:12-05:00 [COMMAND_EXIT_CODE="0"]

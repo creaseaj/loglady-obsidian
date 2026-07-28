@@ -1,0 +1,49 @@
+.loglady-modal { width: min(720px, 90vw); }
+.loglady-modal h2 { margin-top: 0; }
+.loglady-drop {
+  border: 1.5px dashed var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  margin-bottom: 12px;
+}
+.loglady-drop.hot { border-color: var(--interactive-accent); color: var(--text-normal); }
+.loglady-hint { color: var(--text-faint); font-size: 11px; }
+.loglady-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.loglady-row input[type="text"] { flex: 1; min-width: 160px; }
+.loglady-catalog {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+.loglady-sess-head {
+  padding: 6px 10px;
+  font-weight: 600;
+  font-size: 12.5px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.loglady-cmd {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.loglady-cmd:last-child { border-bottom: none; }
+.loglady-cmd:hover { background: var(--background-modifier-hover); }
+.loglady-cmd .txt {
+  font-family: var(--font-monospace);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.loglady-cmd .b { color: var(--text-faint); font-size: 10.5px; white-space: nowrap; }
+.loglady-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.loglady-count { color: var(--text-muted); font-size: 12px; margin-right: auto; align-self: center; }
