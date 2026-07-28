@@ -27,11 +27,20 @@ work, rather than a one-shot dialog. In the panel you can:
   adds per-command timestamps and durations) files;
 - search/filter the reconstructed commands — the session-ending `exit` and
   blank prompt lines are hidden by default;
+- **peek a command's response** — the ▸ button on a row expands the output
+  that command produced (plus its working directory and duration) right
+  under it, so you can confirm you're banking the right run without leaving
+  the panel or creating a note first;
 - **drag a command straight onto an open note** to insert it there at the
   drop position (Obsidian's editor accepts the plain-text drop natively —
   nothing needs to be pre-selected first);
 - or **click rows to bank them** (a running selection, like `loglady.html`'s
-  catalog-to-bank model) and act on the whole batch with the footer buttons:
+  catalog-to-bank model). Banked commands are listed in the collapsible
+  **Bank** section below the catalog, where **×** drops a single entry —
+  the catalog can only unbank what it currently shows, so this is how you
+  remove an entry the filter has scrolled out of view (**Clear** in the
+  footer still empties the whole bank at once). Act on the whole batch with
+  the footer buttons:
   - **Create notes** — one note per banked command (YAML frontmatter: title,
     session, cwd, timestamp, duration, an empty `tags` list) plus one index
     note per session listing `[[wikilinks]]` to its commands, written into
@@ -79,8 +88,8 @@ is unit-tested directly under Node (`tests/parser.test.mjs`) against a small
 synthetic fixture in `tests/fixtures/`, independent of Obsidian. `src/notes.ts`
 builds the Markdown/YAML-frontmatter note bodies. `src/main.ts` registers the
 view, the ribbon icon/command, and the settings tab. `src/view.ts` is the
-panel itself: ingest, catalog rendering, drag-and-drop, the bank, and both
-output actions.
+panel itself: ingest, catalog rendering, output peeking, drag-and-drop, the
+bank list, and both output actions.
 
 ## Notes on scope
 

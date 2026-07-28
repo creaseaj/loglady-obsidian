@@ -1,6 +1,6 @@
 import { ItemView, MarkdownView, Notice, WorkspaceLeaf, normalizePath } from "obsidian";
 import { parseSession, type CommandEntry, type ParsedSession } from "./parser";
-import { commandMarkdown, commandNote, indexNote, sessionTitle, slugFile, uniqueName, fmtTime } from "./notes";
+import { commandMarkdown, commandNote, indexNote, sessionTitle, slugFile, uniqueName, fmtTime, fmtDur } from "./notes";
 import type LogLadyPlugin from "./main";
 
 export const VIEW_TYPE_LOGLADY = "loglady-panel";
@@ -18,15 +18,21 @@ function baseKey(name: string): string {
  * reconstructed commands, and either drag a row straight into an open note
  * (native HTML5 drag — Obsidian's editor accepts a plain-text drop at the
  * cursor position) or click rows to build up a "banked" selection acted on
- * in bulk via the footer buttons. Mirrors loglady.html's catalog/bank model.
+ * in bulk via the footer buttons. Mirrors loglady.html's catalog/bank model,
+ * including its expandable output preview ("peek") and a bank list you can
+ * drop individual entries from.
  */
 export class LogLadyView extends ItemView {
   plugin: LogLadyPlugin;
   sessions: CatalogSession[] = [];
   filter = "";
   hideNoise = true;
+  /** Entries whose output preview is expanded; keyed by entry identity, so it survives re-renders. */
+  peeked = new Set<CommandEntry>();
+  bankOpen = true;
 
   catalogEl!: HTMLElement;
+  bankEl!: HTMLElement;
   countEl!: HTMLElement;
   insertBtn!: HTMLButtonElement;
   createBtn!: HTMLButtonElement;
@@ -60,18 +66,18 @@ export class LogLadyView extends ItemView {
 
     const searchRow = root.createDiv({ cls: "loglady-row" });
     const search = searchRow.createEl("input", { type: "text", attr: { placeholder: "Filter…" } });
-    search.addEventListener("input", () => { this.filter = search.value; this.renderCatalog(); });
+    search.addEventListener("input", () => { this.filter = search.value; this.render(); });
     const toolsRow = root.createDiv({ cls: "loglady-row" });
     const hideNoiseLbl = toolsRow.createEl("label", { cls: "loglady-check" });
     const hideNoiseCb = hideNoiseLbl.createEl("input", { type: "checkbox" });
     hideNoiseCb.checked = this.hideNoise;
     hideNoiseLbl.createSpan({ text: "hide noise" });
-    hideNoiseCb.addEventListener("change", () => { this.hideNoise = hideNoiseCb.checked; this.renderCatalog(); });
+    hideNoiseCb.addEventListener("change", () => { this.hideNoise = hideNoiseCb.checked; this.render(); });
     const selAllBtn = toolsRow.createEl("button", { text: "Select all shown", cls: "loglady-mini" });
     selAllBtn.addEventListener("click", () => this.selectAllShown());
 
     this.catalogEl = root.createDiv({ cls: "loglady-catalog" });
-    this.renderCatalog();
+    this.bankEl = root.createDiv({ cls: "loglady-bank" });
 
     const folderRow = root.createDiv({ cls: "loglady-row" });
     folderRow.createSpan({ text: "Folder:", cls: "loglady-hint" });
@@ -88,7 +94,8 @@ export class LogLadyView extends ItemView {
     const clearBtn = footer.createEl("button", { text: "Clear", cls: "loglady-mini" });
     clearBtn.addEventListener("click", () => this.clearBank());
 
-    this.updateCount();
+    // First paint happens only once every element the renderers touch exists.
+    this.render();
   }
 
   async onClose() {
@@ -117,7 +124,7 @@ export class LogLadyView extends ItemView {
     }
     if (added) new Notice(`Loaded ${added} session${added > 1 ? "s" : ""}`);
     else new Notice("No *_shell.log files found in the selection");
-    this.renderCatalog();
+    this.render();
   }
 
   visibleEntries(sess: CatalogSession): CommandEntry[] {
@@ -131,12 +138,18 @@ export class LogLadyView extends ItemView {
 
   selectAllShown() {
     for (const sess of this.sessions) for (const e of this.visibleEntries(sess)) sess.banked.add(e);
-    this.renderCatalog();
+    this.render();
   }
 
   clearBank() {
     for (const sess of this.sessions) sess.banked.clear();
-    this.renderCatalog();
+    this.render();
+  }
+
+  /** Drop one entry from the bank — the bank list's × button, reachable even when the catalog filters that row out. */
+  unbank(sess: CatalogSession, e: CommandEntry) {
+    sess.banked.delete(e);
+    this.render();
   }
 
   totalBanked(): number {
@@ -150,11 +163,84 @@ export class LogLadyView extends ItemView {
     this.createBtn.disabled = n === 0;
   }
 
+  /** Repaint everything, keeping both lists' scroll positions so a peek/bank click doesn't jump the pane. */
+  render() {
+    const catalogTop = this.catalogEl.scrollTop;
+    const bankList = this.bankEl.querySelector(".loglady-bank-list");
+    const bankTop = bankList instanceof HTMLElement ? bankList.scrollTop : 0;
+
+    this.renderCatalog();
+    this.renderBank();
+    this.updateCount();
+
+    this.catalogEl.scrollTop = catalogTop;
+    const newBankList = this.bankEl.querySelector(".loglady-bank-list");
+    if (newBankList instanceof HTMLElement) newBankList.scrollTop = bankTop;
+  }
+
+  /**
+   * One command row, shared by the catalog and the bank list. In the catalog a
+   * row banks/unbanks on click; in the bank list it carries a × that drops just
+   * that entry. Either way the ▸ button expands the command's captured output
+   * underneath the row.
+   */
+  private renderRow(container: HTMLElement, sess: CatalogSession, e: CommandEntry, mode: "catalog" | "bank") {
+    const banked = sess.banked.has(e);
+    const row = container.createDiv({ cls: "loglady-cmd" + (mode === "catalog" && banked ? " banked" : "") });
+    row.setAttr("draggable", "true");
+    if (mode === "catalog") row.createSpan({ cls: "mark", text: banked ? "✓" : "+" });
+    row.createSpan({ cls: "txt", text: e.command || "(blank line)" });
+    if (e.at) row.createSpan({ cls: "b", text: fmtTime(e.at) });
+
+    const open = this.peeked.has(e);
+    const peekBtn = row.createEl("button", { cls: "loglady-icon" + (e.empty ? " faint" : ""), text: open ? "▾" : "▸" });
+    peekBtn.setAttr("aria-label", open ? "Hide output" : "Peek output");
+    peekBtn.title = e.empty ? "No output captured" : "Peek this command's output";
+    peekBtn.addEventListener("click", ev => {
+      ev.stopPropagation();
+      if (open) this.peeked.delete(e); else this.peeked.add(e);
+      this.render();
+    });
+
+    if (mode === "bank") {
+      row.title = "Drag onto a note to insert · × removes it from the bank";
+      const del = row.createEl("button", { cls: "loglady-icon loglady-del", text: "×" });
+      del.setAttr("aria-label", "Remove from bank");
+      del.title = "Remove from the bank";
+      del.addEventListener("click", ev => { ev.stopPropagation(); this.unbank(sess, e); });
+    } else {
+      row.title = "Click to bank · drag onto a note to insert";
+      row.addEventListener("click", () => {
+        if (banked) sess.banked.delete(e); else sess.banked.add(e);
+        this.render();
+      });
+    }
+
+    row.addEventListener("dragstart", ev => {
+      ev.dataTransfer?.setData("text/plain", commandMarkdown(e));
+      if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "copy";
+      row.addClass("dragging");
+    });
+    row.addEventListener("dragend", () => row.removeClass("dragging"));
+
+    if (open) this.renderPeek(container, e);
+  }
+
+  /** The expanded output preview: cwd/duration line plus the reconstructed output text. */
+  private renderPeek(container: HTMLElement, e: CommandEntry) {
+    const peek = container.createDiv({ cls: "loglady-peek" });
+    const meta: string[] = [];
+    if (e.cwd) meta.push(e.cwd);
+    if (e.dur != null && e.dur > 0) meta.push("took " + fmtDur(e.dur));
+    if (meta.length) peek.createDiv({ cls: "loglady-peek-meta", text: meta.join(" · ") });
+    if (e.output.trim()) peek.createEl("pre", { text: e.output });
+    else peek.createDiv({ cls: "loglady-hint", text: "No output captured for this command." });
+  }
+
   renderCatalog() {
     this.catalogEl.empty();
     if (!this.sessions.length) {
       this.catalogEl.createDiv({ cls: "loglady-hint", text: "No logs loaded yet." });
-      this.updateCount();
       return;
     }
     let anyShown = false;
@@ -166,28 +252,31 @@ export class LogLadyView extends ItemView {
         cls: "loglady-sess-head",
         text: sessionTitle(sess.name, sess.startEpoch) + ` (${sess.banked.size}/${sess.entries.length})`,
       });
-      for (const e of shown) {
-        const row = this.catalogEl.createDiv({ cls: "loglady-cmd" + (sess.banked.has(e) ? " banked" : "") });
-        row.setAttr("draggable", "true");
-        row.createSpan({ cls: "mark", text: sess.banked.has(e) ? "✓" : "+" });
-        row.createSpan({ cls: "txt", text: e.command || "(blank line)" });
-        if (e.at) row.createSpan({ cls: "b", text: fmtTime(e.at) });
-        row.title = "Click to bank · drag onto a note to insert";
-
-        row.addEventListener("click", () => {
-          if (sess.banked.has(e)) sess.banked.delete(e); else sess.banked.add(e);
-          this.renderCatalog();
-        });
-        row.addEventListener("dragstart", ev => {
-          ev.dataTransfer?.setData("text/plain", commandMarkdown(e));
-          if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "copy";
-          row.addClass("dragging");
-        });
-        row.addEventListener("dragend", () => row.removeClass("dragging"));
-      }
+      for (const e of shown) this.renderRow(this.catalogEl, sess, e, "catalog");
     }
     if (!anyShown) this.catalogEl.createDiv({ cls: "loglady-hint", text: this.filter ? "No commands match your filter." : "Nothing to show." });
-    this.updateCount();
+  }
+
+  /**
+   * The bank as its own collapsible list. The catalog can only unbank rows it
+   * currently shows, so entries hidden by the filter would otherwise be stuck
+   * in the batch; every banked entry gets a × here regardless of the filter.
+   */
+  renderBank() {
+    this.bankEl.empty();
+    const picks = this.pickedEntries();
+    this.bankEl.style.display = picks.length ? "" : "none";
+    if (!picks.length) return;
+
+    const head = this.bankEl.createDiv({ cls: "loglady-bank-head" });
+    head.createSpan({ cls: "twist", text: this.bankOpen ? "▾" : "▸" });
+    head.createSpan({ text: `Bank (${picks.length})` });
+    head.title = this.bankOpen ? "Collapse the bank" : "Expand the bank";
+    head.addEventListener("click", () => { this.bankOpen = !this.bankOpen; this.render(); });
+    if (!this.bankOpen) return;
+
+    const list = this.bankEl.createDiv({ cls: "loglady-bank-list" });
+    for (const p of picks) this.renderRow(list, p.sess, p.e, "bank");
   }
 
   private pickedEntries(): { sess: CatalogSession; e: CommandEntry }[] {
