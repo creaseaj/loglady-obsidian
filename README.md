@@ -104,6 +104,14 @@ npm test          # runs the parsing-engine test suite (node:test)
 is unit-tested directly under Node (`tests/parser.test.mjs`) against a small
 synthetic fixture in `tests/fixtures/`, independent of Obsidian.
 
+Command boundaries are detected best-signal-first: OSC 133 semantic prompt
+marks (unambiguous, and they carry each command's exit code) if the recording
+has them, else bracketed-paste toggles (which every modern interactive shell
+emits around the command line, so detection doesn't depend on prompt
+appearance), else a prompt-matching regex as the fallback. The first two read
+the command straight off the reconstructed screen, so redraws and in-place
+history edits are already resolved. `tests/marks.test.mjs` covers all three.
+
 Hand-rolling a VT emulator is a good way to hand-roll its bugs, so
 `tests/differential.test.mjs` replays the same byte streams through
 [xterm.js](https://xtermjs.org) (`@xterm/headless`) and asserts both engines
