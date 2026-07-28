@@ -56,8 +56,7 @@ export class LogLadyView extends ItemView {
     drop.createEl("b", { text: "Drop shell & time logs" });
     drop.createEl("br");
     const pick = drop.createEl("a", { text: "or choose files", href: "#" });
-    const fileInput = root.createEl("input", { type: "file", attr: { multiple: true, accept: ".log,text/plain" } });
-    fileInput.style.display = "none";
+    const fileInput = root.createEl("input", { cls: "loglady-hidden", type: "file", attr: { multiple: true, accept: ".log,text/plain" } });
     pick.addEventListener("click", e => { e.preventDefault(); fileInput.click(); });
     fileInput.addEventListener("change", () => { if (fileInput.files) this.ingest(fileInput.files); fileInput.value = ""; });
     ["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.addClass("hot"); }));
@@ -265,7 +264,7 @@ export class LogLadyView extends ItemView {
   renderBank() {
     this.bankEl.empty();
     const picks = this.pickedEntries();
-    this.bankEl.style.display = picks.length ? "" : "none";
+    this.bankEl.toggleClass("loglady-hidden", picks.length === 0);
     if (!picks.length) return;
 
     const head = this.bankEl.createDiv({ cls: "loglady-bank-head" });

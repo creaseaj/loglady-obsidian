@@ -3,3 +3,7 @@ node_modules/
 !tests/fixtures/*.log
 data.json
 .DS_Store
+
+# Build output — published as GitHub release assets, not committed.
+main.js
+*.map

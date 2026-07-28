@@ -57,13 +57,26 @@ Notes created here use the same frontmatter shape as `loglady.html`'s
 "Download Obsidian Vault" export, so a single Dataview query works across
 notes regardless of which tool created them.
 
-## Install (manual, until this is on the Community Plugins list)
+## Install
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from this repo (or
-   build them yourself — see below).
+### Community plugins (once listed)
+
+Settings → Community plugins → Browse → search **LogLady** → Install, then
+Enable. (Submission to the community list is pending — see
+[PUBLISHING.md](PUBLISHING.md).)
+
+### Manual
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the
+   [latest release](https://github.com/creaseaj/loglady-obsidian/releases/latest)
+   (they're release assets — the built `main.js` is not committed to the repo;
+   you can also build it yourself, see below).
 2. Copy them into `<your vault>/.obsidian/plugins/loglady/`.
 3. Reload Obsidian (or toggle the plugin off/on), then enable **LogLady**
    under Settings → Community plugins.
+
+Dragging a command onto a note needs a pointer, so that path is desktop-only;
+banking plus **Create notes** / **Insert at cursor** works on mobile too.
 
 ## Settings
 
