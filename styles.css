@@ -61,6 +61,66 @@
   text-overflow: ellipsis;
 }
 .loglady-cmd .b { color: var(--text-faint); font-size: 10px; white-space: nowrap; }
+.loglady-icon {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 3px;
+  height: 18px;
+  line-height: 1;
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.loglady-icon:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.loglady-icon.faint { opacity: 0.35; }
+.loglady-del { font-size: 14px; }
+.loglady-del:hover { color: var(--text-error, var(--color-red)); }
+
+.loglady-peek {
+  padding: 4px 8px 6px 27px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.loglady-peek-meta {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-family: var(--font-monospace);
+  margin-bottom: 3px;
+  overflow-wrap: anywhere;
+}
+.loglady-peek pre {
+  margin: 0;
+  padding: 5px 6px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre;
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  line-height: 1.35;
+  background: var(--background-primary);
+  border-radius: 4px;
+}
+
+.loglady-bank { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
+.loglady-bank-head {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.loglady-bank-head .twist { width: 10px; text-align: center; color: var(--text-faint); }
+.loglady-bank-list {
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+.loglady-bank-list .loglady-peek { padding-left: 12px; }
 
 .loglady-count { color: var(--text-muted); font-size: 11.5px; text-align: center; flex-shrink: 0; }
 .loglady-footer { display: flex; gap: 6px; flex-shrink: 0; }
