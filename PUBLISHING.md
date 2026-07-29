@@ -63,7 +63,7 @@ One-time, and only after a published (non-draft, non-prerelease) release exists.
      "id": "loglady",
      "name": "LogLady",
      "author": "creaseaj",
-     "description": "Import script(1) terminal session recordings (shell + timing logs) as clean command/output pairs: insert at cursor, or create linked notes with frontmatter.",
+     "description": "Import script(1) terminal session recordings (shell + timing logs) as clean command/output pairs, and drag any command straight into a note.",
      "repo": "creaseaj/loglady-obsidian"
    }
    ```
