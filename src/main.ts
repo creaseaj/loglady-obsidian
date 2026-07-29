@@ -5,13 +5,11 @@ import { LogLadyView, VIEW_TYPE_LOGLADY } from "./view";
 interface LogLadySettings {
   promptRe: string;
   cwdRe: string;
-  defaultFolder: string;
 }
 
 const DEFAULT_SETTINGS: LogLadySettings = {
   promptRe: DEFAULT_PROMPT_RE,
   cwdRe: DEFAULT_CWD_RE,
-  defaultFolder: "LogLady",
 };
 
 export default class LogLadyPlugin extends Plugin {
@@ -73,12 +71,5 @@ class LogLadySettingTab extends PluginSettingTab {
       .addText(t => t
         .setValue(this.plugin.settings.cwdRe)
         .onChange(async v => { this.plugin.settings.cwdRe = v; await this.plugin.saveSettings(); }));
-
-    new Setting(containerEl)
-      .setName("Default notes folder")
-      .setDesc("Where \"Create notes\" writes by default in the panel (created if it doesn't exist). The panel's own Folder field can override this per-import.")
-      .addText(t => t
-        .setValue(this.plugin.settings.defaultFolder)
-        .onChange(async v => { this.plugin.settings.defaultFolder = v || DEFAULT_SETTINGS.defaultFolder; await this.plugin.saveSettings(); }));
   }
 }
