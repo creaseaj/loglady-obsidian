@@ -92,6 +92,20 @@ test("OSC 133 prompt-start keeps the prompt banner out of the prior output", () 
   assert.equal(s.entries.find(e => e.command === "pwd").output, "/home");
 });
 
+test("output survives when the submit marker trails the command's newline", () => {
+  // smbclient (and ftp, many REPLs) emit ?2004h, draw their own prompt and the
+  // command, end the line, and only THEN emit ?2004l — so the first output
+  // line's byte precedes the submit marker. Anchoring output on the submit byte
+  // dropped that line, which for a one-line result (most smb commands) meant the
+  // whole output vanished. Captured from a real `smbclient` session.
+  const block = (cmd, out) => `${ESC}[?2004hsmb: \\> ${cmd}\r\n${ESC}[?2004l\r` + (out ? out + "\r\n" : "");
+  const s = session(block("ls", "file-a  file-b") + block("get x", "getting file x") + block("exit", ""));
+  const ls = s.entries.find(e => e.command.endsWith("ls"));
+  const get = s.entries.find(e => e.command.endsWith("get x"));
+  assert.equal(ls.output, "file-a  file-b", "multi-run: first output line not dropped");
+  assert.equal(get.output, "getting file x", "single-line output not lost to the submit-byte window");
+});
+
 test("without marks, extraction falls back to the prompt regex", () => {
   // No 2004h/2004l and no OSC 133 -> the dispatcher uses the regex path.
   const { lines, titles, marks } = replay(
