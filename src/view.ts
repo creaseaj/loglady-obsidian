@@ -9,6 +9,19 @@ function baseKey(name: string): string {
   return name.replace(/_(shell|time)\.log$/i, "").replace(/\.(log|txt)$/i, "");
 }
 
+/** FNV-1a (32-bit), enough to fingerprint a log for re-import detection. */
+function fnv1a32(bytes: Uint8Array): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193); }
+  return h >>> 0;
+}
+
+/** A load signature: same name, byte length, shell content, and timing → same import. */
+function sessionSig(name: string, bytes: Uint8Array, timeText: string | null): string {
+  const t = timeText ? fnv1a32(new TextEncoder().encode(timeText)).toString(16) : "0";
+  return `${name}|${bytes.length}|${fnv1a32(bytes).toString(16)}|${t}`;
+}
+
 /**
  * Persistent left-sidebar pane: drop or pick script(1) logs, search the
  * reconstructed commands, peek a command's captured output, and drag any row
@@ -22,6 +35,8 @@ export class LogLadyView extends ItemView {
   hideNoise = true;
   /** Entries whose output preview is expanded; keyed by identity so it survives re-render. */
   peeked = new Set<CommandEntry>();
+  /** Signatures of already-loaded sessions, so re-importing the same log is skipped. */
+  loaded = new Set<string>();
 
   catalogEl!: HTMLElement;
 
@@ -82,15 +97,20 @@ export class LogLadyView extends ItemView {
       const k = baseKey(r.name);
       (groups[k] = groups[k] || {})[r.kind] = r;
     }
-    let added = 0;
+    let added = 0, skipped = 0;
     for (const k of Object.keys(groups).sort()) {
       const g = groups[k];
       if (!g.shell || g.shell.kind !== "shell") continue;
-      const parsed = parseSession(g.shell.name, g.shell.bytes, g.time?.kind === "time" ? g.time.text : null, this.plugin.settings.promptRe, this.plugin.settings.cwdRe);
-      this.sessions.push(parsed);
+      const timeText = g.time?.kind === "time" ? g.time.text : null;
+      const sig = sessionSig(g.shell.name, g.shell.bytes, timeText);
+      if (this.loaded.has(sig)) { skipped++; continue; } // identical log already loaded
+      this.loaded.add(sig);
+      this.sessions.push(parseSession(g.shell.name, g.shell.bytes, timeText, this.plugin.settings.promptRe, this.plugin.settings.cwdRe));
       added++;
     }
-    if (added) new Notice(`Loaded ${added} session${added > 1 ? "s" : ""}`);
+    if (added && skipped) new Notice(`Loaded ${added} session${added > 1 ? "s" : ""}; skipped ${skipped} already loaded`);
+    else if (added) new Notice(`Loaded ${added} session${added > 1 ? "s" : ""}`);
+    else if (skipped) new Notice(`Already loaded — skipped ${skipped} session${skipped > 1 ? "s" : ""}`);
     else new Notice("No *_shell.log files found in the selection");
     this.renderCatalog();
   }

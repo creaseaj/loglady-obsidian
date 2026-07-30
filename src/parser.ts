@@ -45,6 +45,11 @@ export interface ShellMark {
   /** On `input`: the prompt text left of the cursor, so the next command's
    *  prompt line can be trimmed off the prior output without a prompt regex. */
   prompt?: string;
+  /** On `submit`: the byte of the command's own line. Output is anchored to
+   *  this, not to the submit byte — a shell that emits the paste-off marker
+   *  *after* the command's newline (smbclient, ftp, …) puts the first output
+   *  line a byte or two before the marker, and a submit-byte window drops it. */
+  line?: number;
   exit?: number | null;
 }
 
@@ -225,7 +230,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
       const a = s.charAt(4);
       if (a === "A") marks.push({ kind: "prompt", byte });
       else if (a === "B") { inputRow = cy; inputCol = cx; marks.push({ kind: "input", byte, prompt: grid[cy].slice(0, cx).join("") }); }
-      else if (a === "C") marks.push({ kind: "submit", byte, command: commandTextFrom(inputRow, inputCol) });
+      else if (a === "C") marks.push({ kind: "submit", byte, command: commandTextFrom(inputRow, inputCol), line: inputRow >= 0 ? rowByte[inputRow] : byte });
       else if (a === "D") { const m = s.match(/^133;D;(-?\d+)/); marks.push({ kind: "end", byte, exit: m ? parseInt(m[1], 10) : null }); }
       return;
     }
@@ -310,7 +315,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
               // Bracketed paste: the line editor turns it on when it starts
               // reading a command at the prompt, off the instant Enter submits.
               if (set) { inputRow = cy; inputCol = cx; marks.push({ kind: "input", byte: pos, prompt: grid[cy].slice(0, cx).join("") }); }
-              else if (inputRow >= 0) { marks.push({ kind: "submit", byte: pos, command: commandTextFrom(inputRow, inputCol) }); inputRow = -1; }
+              else if (inputRow >= 0) { marks.push({ kind: "submit", byte: pos, command: commandTextFrom(inputRow, inputCol), line: rowByte[inputRow] }); inputRow = -1; }
             }
             else if (!priv && p0 === 4) insertMode = set; // IRM
             break;
@@ -482,7 +487,7 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
   try { cwdRe = cwdSrc ? new RegExp(cwdSrc) : new RegExp(DEFAULT_CWD_RE); } catch { cwdRe = null; }
   const promptRe = new RegExp(DEFAULT_PROMPT_RE);
 
-  interface Cmd { command: string; submitByte: number; boundaryByte: number; promptPrefix: string; exit: number | null; }
+  interface Cmd { command: string; submitByte: number; lineByte: number; boundaryByte: number; promptPrefix: string; exit: number | null; }
   const cmds: Cmd[] = [];
   // The earliest boundary of the command currently being read — its OSC 133
   // prompt-start if present, else its input mark. Used as the *previous*
@@ -492,7 +497,7 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
     if (m.kind === "prompt") { if (boundary == null) boundary = m.byte; }
     else if (m.kind === "input") { if (boundary == null) boundary = m.byte; prompt = m.prompt || ""; }
     else if (m.kind === "submit") {
-      cmds.push({ command: (m.command || "").trim(), submitByte: m.byte, boundaryByte: boundary ?? m.byte, promptPrefix: prompt, exit: null });
+      cmds.push({ command: (m.command || "").trim(), submitByte: m.byte, lineByte: m.line ?? m.byte, boundaryByte: boundary ?? m.byte, promptPrefix: prompt, exit: null });
       boundary = null; prompt = "";
     } else if (m.kind === "end") {
       if (cmds.length) cmds[cmds.length - 1].exit = m.exit ?? null;
@@ -516,7 +521,9 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
   for (let k = 0; k < cmds.length; k++) {
     const c = cmds[k];
     const endByte = k + 1 < cmds.length ? cmds[k + 1].boundaryByte : Infinity;
-    const outLines = lines.filter(ln => ln.byte >= c.submitByte && ln.byte < endByte).map(ln => ln.text);
+    // Start strictly after the command's own line (byte > lineByte), so the
+    // first output line is kept even when the submit marker trails its newline.
+    const outLines = lines.filter(ln => ln.byte > c.lineByte && ln.byte < endByte).map(ln => ln.text);
     while (outLines.length && outLines[0] === "") outLines.shift();
     // Drop the next command's prompt line where it trails this output. The
     // bracketed-paste boundary sits just after the prompt, so the prompt (and,
