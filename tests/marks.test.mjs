@@ -186,6 +186,26 @@ test("a title-derived command still anchors its output window correctly", async 
   assert.equal(entry.output, "real output", "only this command's own output, not the earlier stale content");
 });
 
+test("the last tracked command's output stops at a dangling input mark", async () => {
+  // A session can drop into a program that doesn't emit the local shell's
+  // bracketed-paste markers (an interactive remote shell, e.g.) and never
+  // come back -- so the *last* command extraction can see has no closing
+  // boundary from a next command at all. Without a fallback, its output
+  // window swallows the rest of the file, however long that is. Found via a
+  // real capture: `cd optimum` absorbed an entire unrelated `evil-winrm`
+  // session against a different machine that happened to follow it.
+  const body =
+    `$ ${ESC}[?2004hcd optimum${ESC}[?2004l\r\n` +
+    `own output\r\n` +
+    `$ ${ESC}[?2004h` + // a new prompt starts reading input -- but never submits
+    `whoami\r\n` + // typed into an untracked remote shell
+    `remote-shell-output\r\n`;
+  const s = await session(body);
+  const entry = s.entries.find(e => e.command === "cd optimum");
+  assert.ok(entry);
+  assert.equal(entry.output, "own output", "the dangling input mark bounds the window, not the end of the file");
+});
+
 test("a same-row retry doesn't erase the previous attempt's brief output", async () => {
   // A fast retry loop can jump the cursor back onto an earlier prompt's own
   // row and retype directly over it, with no scroll in between -- but the

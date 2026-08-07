@@ -514,6 +514,17 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
     }
   }
   if (!cmds.length) return [];
+  // `boundary` here, if still set, is a dangling input/prompt mark that
+  // never got a matching submit -- typing started again (often because the
+  // session dropped into an interactive program, like a remote shell, that
+  // doesn't emit the same bracketed-paste/OSC-133 markers the local shell
+  // does) but nothing closed it out on marks alone. Without this, the
+  // *last* tracked command has no closing boundary at all and its output
+  // window silently swallows the entire rest of the file -- found via a
+  // real capture where `cd optimum` was immediately followed by an
+  // `evil-winrm` session against a different machine, and every line of
+  // that unrelated session ended up glued onto `cd`'s own output.
+  const trailingBoundary = boundary ?? Infinity;
 
   // A screen-scraped command can come out empty even though the shell really
   // ran something: a completion/history widget can blank the input row as
@@ -526,7 +537,7 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
   const titleCwdShape = /^[^\s@]+@[^\s@]+:\s?/;
   for (let k = 0; k < cmds.length; k++) {
     if (cmds[k].command !== "") continue;
-    const hi = k + 1 < cmds.length ? cmds[k + 1].boundaryByte : Infinity;
+    const hi = k + 1 < cmds.length ? cmds[k + 1].boundaryByte : trailingBoundary;
     for (const t of titles) {
       if (t.byte <= cmds[k].submitByte || t.byte > hi) continue;
       if (t.code !== 2) continue;
@@ -552,7 +563,7 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
   const entries: CommandEntry[] = [];
   for (let k = 0; k < cmds.length; k++) {
     const c = cmds[k];
-    const endByte = k + 1 < cmds.length ? cmds[k + 1].boundaryByte : Infinity;
+    const endByte = k + 1 < cmds.length ? cmds[k + 1].boundaryByte : trailingBoundary;
     // Start strictly after the command's own line (byte > lineByte), so the
     // first output line is kept even when the submit marker trails its newline.
     const outLines = lines.filter(ln => ln.byte > c.lineByte && ln.byte < endByte).map(ln => ln.text);
