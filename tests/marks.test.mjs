@@ -33,8 +33,8 @@ function pasteBlock(cmd, output) {
   );
 }
 
-test("bracketed paste splits commands without a matching prompt regex", () => {
-  const s = session(pasteBlock("echo one", "one") + pasteBlock("echo two", "two") + pasteBlock("exit", ""));
+test("bracketed paste splits commands without a matching prompt regex", async () => {
+  const s = await session(pasteBlock("echo one", "one") + pasteBlock("echo two", "two") + pasteBlock("exit", ""));
   const cmds = s.entries.map(e => e.command);
   assert.deepEqual(cmds, ["echo one", "echo two", "exit"]);
   const one = s.entries.find(e => e.command === "echo one");
@@ -43,7 +43,7 @@ test("bracketed paste splits commands without a matching prompt regex", () => {
   assert.equal(s.entries.find(e => e.command === "exit").noise, true);
 });
 
-test("the command is read off the final screen, so redraws and edits resolve", () => {
+test("the command is read off the final screen, so redraws and edits resolve", async () => {
   // Type "grep", then the shell recalls and rewrites the line to "grep -ri foo"
   // with cursor motion and overwrites — the reconstructed command is the final
   // visible text, not the concatenation of keystrokes.
@@ -51,31 +51,31 @@ test("the command is read off the final screen, so redraws and edits resolve", (
     "grep" +               // initial keystrokes
     `${ESC}[4D` +          // cursor back to start of the word
     `${ESC}[Kgrep -ri foo`; // erase to EOL and lay down the final command
-  const s = session(`$ ${ESC}[?2004h${typed}${ESC}[?2004l\r\nmatch\r\n`);
+  const s = await session(`$ ${ESC}[?2004h${typed}${ESC}[?2004l\r\nmatch\r\n`);
   assert.equal(s.entries[0].command, "grep -ri foo");
   assert.equal(s.entries[0].output, "match");
 });
 
-test("a bare Enter at the prompt is a boundary, not a command", () => {
-  const s = session(pasteBlock("", "") + pasteBlock("ls", "file") + pasteBlock("", ""));
+test("a bare Enter at the prompt is a boundary, not a command", async () => {
+  const s = await session(pasteBlock("", "") + pasteBlock("ls", "file") + pasteBlock("", ""));
   const real = s.entries.filter(e => !e.noise);
   assert.deepEqual(real.map(e => e.command), ["ls"]);
   assert.ok(s.entries.every(e => e.command !== "" || e.noise), "empty commands are marked noise");
 });
 
-test("a wrapped command line is reassembled across rows", () => {
+test("a wrapped command line is reassembled across rows", async () => {
   const long = "echo " + "x".repeat(90); // longer than 40 cols -> wraps
-  const s = session(`$ ${ESC}[?2004h${long}${ESC}[?2004l\r\ndone\r\n`, { cols: 40, rows: 10 });
+  const s = await session(`$ ${ESC}[?2004h${long}${ESC}[?2004l\r\ndone\r\n`, { cols: 40, rows: 10 });
   assert.equal(s.entries[0].command, long);
 });
 
-test("OSC 133 A/B/C/D marks split commands and capture the exit code", () => {
+test("OSC 133 A/B/C/D marks split commands and capture the exit code", async () => {
   const ST = `${ESC}\\`;
   const block = (cmd, out, code) =>
     `${ESC}]133;A${ST}fancyprompt$ ${ESC}]133;B${ST}${cmd}${ESC}]133;C${ST}\r\n` +
     (out ? out + "\r\n" : "") +
     `${ESC}]133;D;${code}${ST}`;
-  const s = session(block("whoami", "root", 0) + block("false", "", 1));
+  const s = await session(block("whoami", "root", 0) + block("false", "", 1));
   const cmds = s.entries.map(e => e.command);
   assert.deepEqual(cmds, ["whoami", "false"]);
   assert.equal(s.entries.find(e => e.command === "whoami").exit, 0);
@@ -83,49 +83,78 @@ test("OSC 133 A/B/C/D marks split commands and capture the exit code", () => {
   assert.equal(s.entries.find(e => e.command === "whoami").output, "root");
 });
 
-test("OSC 133 prompt-start keeps the prompt banner out of the prior output", () => {
+test("OSC 133 prompt-start keeps the prompt banner out of the prior output", async () => {
   const ST = `${ESC}\\`;
   const block = (cmd, out) =>
     `${ESC}]133;A${ST}myhost:~$ ${ESC}]133;B${ST}${cmd}${ESC}]133;C${ST}\r\n` + (out ? out + "\r\n" : "");
-  const s = session(block("pwd", "/home") + block("id", "uid=0"));
+  const s = await session(block("pwd", "/home") + block("id", "uid=0"));
   // pwd's output is exactly its own, with no bleed of id's prompt line.
   assert.equal(s.entries.find(e => e.command === "pwd").output, "/home");
 });
 
-test("output survives when the submit marker trails the command's newline", () => {
+test("output survives when the submit marker trails the command's newline", async () => {
   // smbclient (and ftp, many REPLs) emit ?2004h, draw their own prompt and the
   // command, end the line, and only THEN emit ?2004l — so the first output
   // line's byte precedes the submit marker. Anchoring output on the submit byte
   // dropped that line, which for a one-line result (most smb commands) meant the
   // whole output vanished. Captured from a real `smbclient` session.
   const block = (cmd, out) => `${ESC}[?2004hsmb: \\> ${cmd}\r\n${ESC}[?2004l\r` + (out ? out + "\r\n" : "");
-  const s = session(block("ls", "file-a  file-b") + block("get x", "getting file x") + block("exit", ""));
+  const s = await session(block("ls", "file-a  file-b") + block("get x", "getting file x") + block("exit", ""));
   const ls = s.entries.find(e => e.command.endsWith("ls"));
   const get = s.entries.find(e => e.command.endsWith("get x"));
   assert.equal(ls.output, "file-a  file-b", "multi-run: first output line not dropped");
   assert.equal(get.output, "getting file x", "single-line output not lost to the submit-byte window");
 });
 
-test("a long command that scrolls the screen while typed is still read whole", () => {
+test("a long command that scrolls the screen while typed is still read whole", async () => {
   // On a short screen the wrapping command scrolls, moving its first row up. The
   // input row has to follow the scroll, or the command reads from a stale row
   // and comes out a fragment. This is the shape of the recalled-command bug.
   const cmd = "echo " + "z".repeat(120);
   const body = "l1\r\nl2\r\nl3\r\nl4\r\n$ " + ESC + "[?2004h" + cmd + ESC + "[?2004l\r\ndone\r\n";
-  const s = session(body, { cols: 24, rows: 6 });
+  const s = await session(body, { cols: 24, rows: 6 });
   assert.equal(s.entries.find(e => e.command.startsWith("echo")).command, cmd);
 });
 
-test("an explicit width override replaces the recording's header COLUMNS", () => {
+test("an explicit width override replaces the recording's header COLUMNS", async () => {
   const body = "$ " + ESC + "[?2004h" + "ls -la" + ESC + "[?2004l\r\nfile\r\n";
-  const s = session(body, { cols: 200, rows: 24, widthOverride: 40 });
+  const s = await session(body, { cols: 200, rows: 24, widthOverride: 40 });
   assert.equal(s.cols, 40, "override wins over the header's 200");
   assert.equal(s.entries.find(e => e.command.startsWith("ls")).command, "ls -la");
 });
 
-test("without marks, extraction falls back to the prompt regex", () => {
+test("a blanked input row falls back to the shell's own title for the command", async () => {
+  // A completion/history widget can erase the input row as part of its own
+  // redraw dance an instant before Enter, so nothing is left on screen at
+  // submit even though the shell really ran something. Found in a real
+  // capture: `net rpc group addmem "EXCHANGE WINDOWS PERMISSIONS" ... -I ...`
+  // vanished from the reconstruction entirely (silently classed as a
+  // bare-Enter no-op) because the row was blank at the exact submit byte.
+  // zsh's preexec hook sets the window title (OSC 2) to the literal command
+  // right as it starts, so it survives even when the screen doesn't.
+  const cmd = 'net rpc group addmem "EXCHANGE WINDOWS PERMISSIONS" "svc-alfresco"';
+  const block =
+    `$ ${ESC}[?2004h${cmd}\r${ESC}[K${ESC}[?2004l\r\n` + // typed, then the row is wiped before submit
+    `${ESC}]2;${cmd}${ESC}\\` + // the shell's own record of what it ran
+    `ok\r\n`;
+  const s = await session(block);
+  const entry = s.entries.find(e => e.command === cmd);
+  assert.ok(entry, "the title-derived command is recovered instead of dropped as noise");
+  assert.equal(entry.noise, false);
+});
+
+test("a blanked input row with no usable title stays noise, not garbage", async () => {
+  // Same blanked-row shape, but the following title is the idle "user@host:
+  // cwd" one (no command actually ran) -- must not be mistaken for a command.
+  const block = `$ ${ESC}[?2004h${ESC}[?2004l\r\n${ESC}]2;user@host: ~${ESC}\\`;
+  const s = await session(block);
+  const real = s.entries.filter(e => !e.noise);
+  assert.equal(real.length, 0, "the idle cwd title is never mistaken for a command");
+});
+
+test("without marks, extraction falls back to the prompt regex", async () => {
   // No 2004h/2004l and no OSC 133 -> the dispatcher uses the regex path.
-  const { lines, titles, marks } = replay(
+  const { lines, titles, marks } = await replay(
     enc("sh-5.1$ echo hi\r\nhi\r\nsh-5.1$ exit\r\n"), 80, 24
   );
   assert.equal(marks.length, 0, "no marks recovered from a plain typescript");

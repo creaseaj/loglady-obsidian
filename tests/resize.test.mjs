@@ -48,22 +48,24 @@ test("buildTiming maps offsets from advanced O records, folding in wait time", (
   assert.ok(at(46) >= at(38), "monotonic across the signal record");
 });
 
-test("a resize rescues a redraw that a fixed width would mangle", () => {
+test("a resize rescues a redraw that a fixed width would mangle", async () => {
   // A command drawn then edited with CR + erase-line + rewrite of the tail.
   // At a NARROW width it wraps, so erase-line only clears the last row and the
   // command survives. At a WIDE width it's one row, so erase-line wipes all of
   // it and only the rewritten tail is left — exactly the reported corruption.
   const body = "cmd-" + "a".repeat(40) + "\r" + ESC + "[K" + "bbbb";
 
-  const wide = trimTail(replay(enc(body), 100, 24, []).lines.map(l => l.text));
+  const wideResult = await replay(enc(body), 100, 24, []);
+  const wide = trimTail(wideResult.lines.map(l => l.text));
   assert.deepEqual(wide, ["bbbb"], "no resize, wide: command wiped by erase-line");
 
-  const narrow = trimTail(replay(enc(body), 100, 24, [{ byte: 0, cols: 30, rows: 24 }]).lines.map(l => l.text));
+  const narrowResult = await replay(enc(body), 100, 24, [{ byte: 0, cols: 30, rows: 24 }]);
+  const narrow = trimTail(narrowResult.lines.map(l => l.text));
   assert.ok(narrow.join("").startsWith("cmd-aaaa"), "resize to 30: the command front survives");
   assert.ok(narrow.join("").endsWith("bbbb"), "and the edited tail is kept");
 });
 
-test("a resize doesn't truncate output that was already on screen", () => {
+test("a resize doesn't truncate output that was already on screen", async () => {
   // On a tall terminal most of the session stays "on screen" (unscrolled) for
   // a long time. A real capture had an `ls` listing written at COLUMNS=476,
   // then several commands later a mid-session resize narrowed to COLS=236 —
@@ -72,18 +74,23 @@ test("a resize doesn't truncate output that was already on screen", () => {
   const longLine = "x".repeat(300); // fits at 400 cols, would wrap/truncate at 100
   const body = longLine + "\r\n" + "y".repeat(50) + "\r\n";
   const resizeAt = longLine.length + 2 + 10; // well after the long line is committed
-  const { lines } = replay(enc(body), 400, 50, [{ byte: resizeAt, cols: 100, rows: 50 }]);
+  const { lines } = await replay(enc(body), 400, 50, [{ byte: resizeAt, cols: 100, rows: 50 }]);
   const text = lines.map(l => l.text).join("");
   assert.ok(text.includes(longLine), "the pre-resize line survives the later narrower resize intact");
 });
 
-test("resize matches xterm.js reflow for content written after the change", async () => {
+test("our chunked resize handling matches xterm.js's own resize()+reflow", async () => {
+  // Sanity check on the wrapper, not the engine (replay() delegates to
+  // xterm.js directly now): feeding bytes in chunks split at each resize's
+  // byte offset, with term.resize() called between them, must reflow the
+  // same way a direct term.write()/term.resize()/term.write() sequence does.
   const pre = "line-at-wide-width\r\n";
   const post = "x".repeat(50) + "\r\n"; // wraps only at the narrow width
   const body = enc(pre + post);
   const at = pre.length;
 
-  const ours = trimTail(replay(body, 100, 24, [{ byte: at, cols: 40, rows: 24 }]).lines.map(l => l.text.replace(/\s+$/, "")));
+  const oursResult = await replay(body, 100, 24, [{ byte: at, cols: 40, rows: 24 }]);
+  const ours = trimTail(oursResult.lines.map(l => l.text.replace(/\s+$/, "")));
 
   const term = new Terminal({ cols: 100, rows: 24, scrollback: 500, allowProposedApi: true });
   await new Promise(r => term.write(enc(pre), r));
@@ -96,7 +103,7 @@ test("resize matches xterm.js reflow for content written after the change", asyn
     if (l.isWrapped && theirs.length) theirs[theirs.length - 1] += s; else theirs.push(s);
   }
   term.dispose();
-  // The post-resize wrapped line reassembles the same in both engines.
+  // The post-resize wrapped line reassembles the same via both paths.
   assert.ok(ours.includes("x".repeat(50)), "our post-resize line reflows to one logical line");
-  assert.ok(trimTail(theirs.map(s => s.replace(/\s+$/, ""))).includes("x".repeat(50)), "xterm agrees");
+  assert.ok(trimTail(theirs.map(s => s.replace(/\s+$/, ""))).includes("x".repeat(50)), "direct xterm.js usage agrees");
 });

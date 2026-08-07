@@ -34,25 +34,30 @@ Then open the **LogLady panel** — the ribbon icon (terminal glyph), or the
 command **LogLady: Open panel** — a persistent pane in the left sidebar that
 stays open while you work. In the panel you can:
 
-- drop or pick the `*_shell.log` (required) and `*_time.log` (optional,
-  adds per-command timestamps and durations) files;
+- drop or pick the `*_shell.log` (required) and `*_time.log` (optional —
+  needed only if you resized the terminal mid-recording, see below) files;
 - search/filter the reconstructed commands — the session-ending `exit` and
   blank prompt lines are hidden by default;
 - **peek a command's response** — the ▸ button on a row expands the output
-  that command produced (plus its working directory, duration, and exit code
-  when known) right under it, without leaving the panel;
+  that command produced (plus its working directory and exit code when
+  known) right under it, without leaving the panel;
 - **drag a command straight onto an open note** to insert it there at the
   drop position — the command as a Markdown block (heading, a meta line, and
   the captured output in a fenced block). Obsidian's editor accepts the
   plain-text drop natively, so nothing needs to be selected first.
 
 The raw typescript is full of cursor-movement, tab-completion, and colour
-escape codes — a small built-in terminal emulator replays it to reconstruct
-just the clean visible text before anything is imported. Running `clear`
-mid-session doesn't cost you the commands above it (they go to the emulator's
-scrollback, the way a real terminal would), and full-screen programs like
-`vim`, `less` or `htop` draw on the alternate screen, so their frames stay out
-of the imported output.
+escape codes — a real terminal emulator ([xterm.js](https://xtermjs.org))
+replays it to reconstruct just the clean visible text before anything is
+imported. Running `clear` mid-session doesn't cost you the commands above it
+(they go to scrollback, the way a real terminal would), and full-screen
+programs like `vim`, `less` or `htop` draw on the alternate screen, so their
+frames stay out of the imported output.
+
+Per-command timestamps and durations aren't available: reconstruction goes
+through a real terminal emulator now rather than a hand-rolled one that
+tracked a byte offset per line, and there's no way to recover elapsed time
+from the emulator's screen state alone.
 
 ## Install
 
@@ -94,30 +99,45 @@ npm run build    # type-check, then a minified production build
 npm test          # runs the parsing-engine test suite (node:test)
 ```
 
-`src/parser.ts` is the terminal-emulator/session-parsing engine, kept
-dependency-free and Obsidian-API-free on purpose — it is unit-tested directly
-under Node (`tests/parser.test.mjs`) against a small synthetic fixture in
-`tests/fixtures/`, independent of Obsidian.
+`src/parser.ts` is the session-parsing engine — Obsidian-API-free on purpose,
+so it's unit-tested directly under Node (`tests/parser.test.mjs`,
+`tests/marks.test.mjs`, `tests/resize.test.mjs`, `tests/history.test.mjs`)
+against a small synthetic fixture in `tests/fixtures/` and a battery of
+synthetic byte streams, independent of Obsidian. VT reconstruction itself is
+delegated to [`@xterm/headless`](https://xtermjs.org) — a real, well-tested
+terminal emulator rather than a hand-rolled one — via `replay()`, which feeds
+it the raw bytes and hooks its OSC/CSI parser to recover shell-integration
+marks. `main.js` bundles it, so hand-rolled-emulator bugs are no longer a
+class of bug this project has; the trade-off is bundle size (`main.js` is
+~200 KB) and the lost timestamp mapping mentioned above.
 
-Command boundaries are detected best-signal-first: OSC 133 semantic prompt
-marks (unambiguous, and they carry each command's exit code) if the recording
-has them, else bracketed-paste toggles (which every modern interactive shell
-emits around the command line, so detection doesn't depend on prompt
-appearance), else a prompt-matching regex as the fallback. The first two read
-the command straight off the reconstructed screen, so redraws and in-place
-history edits are already resolved. `tests/marks.test.mjs` covers all three.
+`replay()` layers a few things on top of a plain xterm.js session:
 
-Hand-rolling a VT emulator is a good way to hand-roll its bugs, so
-`tests/differential.test.mjs` replays the same byte streams through
-[xterm.js](https://xtermjs.org) (`@xterm/headless`) and asserts both engines
-reconstruct identical text. xterm.js is a **dev dependency only** — it never
-enters the shipped bundle, which keeps `main.js` small. Two divergences are
-deliberate and asserted as such: a full screen erase (`clear`) and an explicit
-scroll-up keep the lines a screen emulator discards, because this tool
-reconstructs a session log rather than a screen. `src/notes.ts` builds the
-Markdown block a dragged command drops into a note. `src/main.ts` registers the
-view, the ribbon icon/command, and the settings tab. `src/view.ts` is the panel
-itself: ingest, catalog rendering, output peeking, and drag-and-drop.
+- **Command boundaries**, detected best-signal-first: OSC 133 semantic prompt
+  marks (unambiguous, and they carry each command's exit code) if the
+  recording has them, else bracketed-paste toggles (which every modern
+  interactive shell emits around the command line, so detection doesn't
+  depend on prompt appearance), else a prompt-matching regex as the fallback.
+  The first two read the command straight off the reconstructed screen, so
+  redraws and in-place history edits are already resolved — and if a
+  completion widget leaves the screen genuinely blank at the exact moment of
+  submit, the shell's own window-title update (many shells set it to the
+  literal command as it starts) is tried as a fallback before giving up.
+  `tests/marks.test.mjs` covers all of this.
+- **History survives a full erase, reset, or explicit scroll.** xterm.js is a
+  screen emulator: `clear`, a full reset (RIS), and an explicit scroll-up all
+  discard whatever hadn't scrolled off yet, the same way a real terminal's
+  *display* would. This tool reconstructs a session log, not a screen, so
+  `replay()` snapshots that content into its own history before letting
+  xterm.js drop it — `tests/history.test.mjs` covers this.
+- **Mid-session resizes** (from an advanced-format timing log) are applied via
+  xterm.js's own `resize()`, which reflows in-flight content the way a real
+  terminal does — `tests/resize.test.mjs`.
+
+`src/notes.ts` builds the Markdown block a dragged command drops into a note.
+`src/main.ts` registers the view, the ribbon icon/command, and the settings
+tab. `src/view.ts` is the panel itself: ingest, catalog rendering, output
+peeking, and drag-and-drop.
 
 ## Notes on scope
 
