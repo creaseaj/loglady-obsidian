@@ -242,21 +242,32 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
     // *final* state of each row survives to the end-of-replay buffer read,
     // so unlike a real terminal (where a human watching would have seen
     // it), that content is gone for good the instant it's overwritten
-    // unless it's captured right now. Snapshot the span from the last
-    // submit's row through the bottom of the viewport (not just to the
-    // cursor's current row -- a retry can jump the cursor back up to the
-    // prompt row while real output it's about to clobber still sits a row
-    // or two below it) -- but not the whole viewport from the top, via
-    // preserveViewport(): rows above the last submit never scrolled either,
-    // but also never changed (a `--help` dump sitting higher up, e.g.) and
-    // aren't part of what this command produced.
+    // unless it's captured right now. Snapshot the span from just above the
+    // cursor through a few rows below it -- a retry can jump the cursor back
+    // up to the prompt row while real output it's about to clobber still
+    // sits a row or two below it, so the cursor's own row alone isn't a wide
+    // enough net. Both bounds are capped to a small margin around the
+    // cursor, *not* lastSubmitRow itself: on a tall terminal, a lot of
+    // ordinary scrolling can happen between the last real submit and this
+    // one (this command's own output, e.g.) with no other event updating
+    // lastSubmitRow in between, so it can be thousands of rows stale by the
+    // time a same-row collision (checked against the *current* row via
+    // lastRowAt, which every mark/title keeps fresh) actually happens --
+    // an uncapped range would then sweep in the entire viewport, including
+    // unrelated, already-frozen content sitting far above (a `--help` dump
+    // the cursor jumps around inside of, e.g.) that was never part of what
+    // any of these commands produced.
+    const MARGIN = 4;
     const buf = term.buffer.active;
     const bufRow = buf.baseY + buf.cursorY; // xterm.js's own buffer index -- independent of rowOffset
     if (isNormal() && rowOffset + bufRow <= lastRowAt && lastSubmitRow >= 0) {
       // preserveRange() bumps rowOffset, so anything computed against the
       // *old* rowOffset before this point (raw row-at values) must not be
       // reused afterward -- bufRow itself is untouched by it, though.
-      preserveRange(lastSubmitRow - buf.baseY, term.rows - 1);
+      const cursorY = bufRow - buf.baseY;
+      const fromY = Math.max(lastSubmitRow - buf.baseY, cursorY - MARGIN);
+      const toY = Math.min(term.rows - 1, cursorY + MARGIN);
+      preserveRange(fromY, toY);
     }
     inputRow = rowOffset + bufRow; inputCol = buf.cursorX;
     inputByte = rowAt();
