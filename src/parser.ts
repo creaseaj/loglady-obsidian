@@ -195,6 +195,9 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, resize
       grid.splice(top, 1); grid.splice(bot, 0, blank());
       wrap.splice(top, 1); wrap.splice(bot, 0, false);
       rowByte.splice(top, 1); rowByte.splice(bot, 0, pos);
+      // Keep the pending command's row pointing at the same content as it moves
+      // up; -1 once it scrolls off the top, so a scrolled-away input isn't read.
+      if (inputRow >= top && inputRow <= bot) inputRow--;
     }
   }
   function scrollRegionDown(k = 1) {
@@ -202,6 +205,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, resize
       grid.splice(bot, 1); grid.splice(top, 0, blank());
       wrap.splice(bot, 1); wrap.splice(top, 0, false);
       rowByte.splice(bot, 1); rowByte.splice(top, 0, pos);
+      if (inputRow >= top && inputRow < bot) inputRow++;
     }
   }
   function lf() {
@@ -224,12 +228,14 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, resize
    */
   function breakIncoming(y: number) { if (y > 0) wrap[y - 1] = false; }
   /**
-   * The command text as it stands on screen right now, from a start position
-   * just past the prompt through the end of its (possibly wrapped) line. Read
-   * at submit time, so cursor motion, redraws, and history-recall edits are
-   * already resolved into the final visible characters.
+   * The command as it stands on screen at submit: from the input position, past
+   * the prompt, through the end of its (possibly wrapped) line. inputRow is kept
+   * valid across scrolls (see scrollRegionUp/Down), so a long command that
+   * scrolled the screen while being typed or recalled is still read from its own
+   * row rather than a stale one.
    */
-  function commandTextFrom(sy: number, sx: number): string {
+  function commandAtSubmit(): string {
+    const sy = inputRow, sx = inputCol;
     if (sy < 0 || sy >= rows) return "";
     const parts = [grid[sy].slice(Math.min(sx, cols)).join("")];
     let y = sy;
@@ -242,7 +248,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, resize
       const a = s.charAt(4);
       if (a === "A") marks.push({ kind: "prompt", byte });
       else if (a === "B") { inputRow = cy; inputCol = cx; marks.push({ kind: "input", byte, prompt: grid[cy].slice(0, cx).join("") }); }
-      else if (a === "C") marks.push({ kind: "submit", byte, command: commandTextFrom(inputRow, inputCol), line: inputRow >= 0 ? rowByte[inputRow] : byte });
+      else if (a === "C") marks.push({ kind: "submit", byte, command: commandAtSubmit(), line: inputRow >= 0 ? rowByte[inputRow] : byte });
       else if (a === "D") { const m = s.match(/^133;D;(-?\d+)/); marks.push({ kind: "end", byte, exit: m ? parseInt(m[1], 10) : null }); }
       return;
     }
@@ -355,7 +361,7 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, resize
               // Bracketed paste: the line editor turns it on when it starts
               // reading a command at the prompt, off the instant Enter submits.
               if (set) { inputRow = cy; inputCol = cx; marks.push({ kind: "input", byte: pos, prompt: grid[cy].slice(0, cx).join("") }); }
-              else if (inputRow >= 0) { marks.push({ kind: "submit", byte: pos, command: commandTextFrom(inputRow, inputCol), line: rowByte[inputRow] }); inputRow = -1; }
+              else if (inputRow >= 0) { marks.push({ kind: "submit", byte: pos, command: commandAtSubmit(), line: rowByte[inputRow] }); inputRow = -1; }
             }
             else if (!priv && p0 === 4) insertMode = set; // IRM
             break;
@@ -687,11 +693,14 @@ function firstLine(bytes: Uint8Array): { text: string; end: number } {
   return { text: dec.decode(bytes.slice(0, nl)), end: nl + 1 };
 }
 
-export function parseSession(name: string, bytes: Uint8Array, timeText: string | null, promptSrc?: string, cwdSrc?: string): ParsedSession {
+export function parseSession(name: string, bytes: Uint8Array, timeText: string | null, promptSrc?: string, cwdSrc?: string, colsOverride?: number): ParsedSession {
   const hdr = firstLine(bytes);
   const h = hdr.text;
   const started = (h.match(/Script started on\s+(.+?)\s*\[/) || [])[1] || "";
-  const cols = parseInt((h.match(/COLUMNS="?(\d+)/) || [])[1] || "0", 10) || 80;
+  // A recording's header COLUMNS is wrong when script captured a different size
+  // than the shell wrapped at (e.g. script outside a narrower tmux pane), which
+  // corrupts every wrapped redraw. An explicit override wins over the header.
+  const cols = (colsOverride && colsOverride > 0) ? colsOverride : (parseInt((h.match(/COLUMNS="?(\d+)/) || [])[1] || "0", 10) || 80);
   const rows = parseInt((h.match(/LINES="?(\d+)/) || [])[1] || "0", 10) || 24;
   const tty = (h.match(/TTY="([^"]+)"/) || [])[1] || "";
   const term = (h.match(/TERM="([^"]+)"/) || [])[1] || "";

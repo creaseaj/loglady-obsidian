@@ -5,11 +5,13 @@ import { LogLadyView, VIEW_TYPE_LOGLADY } from "./view";
 interface LogLadySettings {
   promptRe: string;
   cwdRe: string;
+  assumedWidth: number;
 }
 
 const DEFAULT_SETTINGS: LogLadySettings = {
   promptRe: DEFAULT_PROMPT_RE,
   cwdRe: DEFAULT_CWD_RE,
+  assumedWidth: 0,
 };
 
 export default class LogLadyPlugin extends Plugin {
@@ -71,5 +73,12 @@ class LogLadySettingTab extends PluginSettingTab {
       .addText(t => t
         .setValue(this.plugin.settings.cwdRe)
         .onChange(async v => { this.plugin.settings.cwdRe = v; await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl)
+      .setName("Assumed terminal width")
+      .setDesc("Override the width recorded in the log's header. Use this when script captured a different size than the shell wrapped at (e.g. script run outside a narrower tmux pane), which garbles long recalled commands. 0 = trust the recording.")
+      .addText(t => t
+        .setValue(String(this.plugin.settings.assumedWidth || 0))
+        .onChange(async v => { this.plugin.settings.assumedWidth = Math.max(0, parseInt(v, 10) || 0); await this.plugin.saveSettings(); }));
   }
 }

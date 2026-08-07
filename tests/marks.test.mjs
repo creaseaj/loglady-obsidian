@@ -14,12 +14,12 @@ import { parseSession, replay, extractEntries } from "../src/parser.ts";
 const ESC = "\x1b";
 const enc = s => new TextEncoder().encode(s);
 
-function session(body, { cols = 80, rows = 24 } = {}) {
+function session(body, { cols = 80, rows = 24, widthOverride } = {}) {
   const text =
     `Script started on 2026-01-05 10:00:00-05:00 [TERM="xterm-256color" TTY="/dev/pts/0" COLUMNS="${cols}" LINES="${rows}"]\r\n` +
     body +
     `Script done on 2026-01-05 10:30:00-05:00 [COMMAND_EXIT_CODE="0"]\r\n`;
-  return parseSession("t_shell.log", enc(text), null);
+  return parseSession("t_shell.log", enc(text), null, undefined, undefined, widthOverride);
 }
 
 // A zsh-style two-line prompt whose command line is wrapped in bracketed paste.
@@ -104,6 +104,23 @@ test("output survives when the submit marker trails the command's newline", () =
   const get = s.entries.find(e => e.command.endsWith("get x"));
   assert.equal(ls.output, "file-a  file-b", "multi-run: first output line not dropped");
   assert.equal(get.output, "getting file x", "single-line output not lost to the submit-byte window");
+});
+
+test("a long command that scrolls the screen while typed is still read whole", () => {
+  // On a short screen the wrapping command scrolls, moving its first row up. The
+  // input row has to follow the scroll, or the command reads from a stale row
+  // and comes out a fragment. This is the shape of the recalled-command bug.
+  const cmd = "echo " + "z".repeat(120);
+  const body = "l1\r\nl2\r\nl3\r\nl4\r\n$ " + ESC + "[?2004h" + cmd + ESC + "[?2004l\r\ndone\r\n";
+  const s = session(body, { cols: 24, rows: 6 });
+  assert.equal(s.entries.find(e => e.command.startsWith("echo")).command, cmd);
+});
+
+test("an explicit width override replaces the recording's header COLUMNS", () => {
+  const body = "$ " + ESC + "[?2004h" + "ls -la" + ESC + "[?2004l\r\nfile\r\n";
+  const s = session(body, { cols: 200, rows: 24, widthOverride: 40 });
+  assert.equal(s.cols, 40, "override wins over the header's 200");
+  assert.equal(s.entries.find(e => e.command.startsWith("ls")).command, "ls -la");
 });
 
 test("without marks, extraction falls back to the prompt regex", () => {

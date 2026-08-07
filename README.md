@@ -79,6 +79,11 @@ Dragging a command onto a note needs a pointer, so the plugin is desktop-first.
 - **Command prompt regex** / **Working-directory regex** — the fallback
   prompt-detection regexes, for shells whose recordings carry no OSC 133 or
   bracketed-paste marks and don't use the default Kali-style two-line prompt.
+- **Assumed terminal width** — override the width recorded in the log's header.
+  If `script` captured a different size than the shell wrapped at (e.g. `script`
+  run outside a narrower tmux pane), long recalled commands come out garbled;
+  set this to the width the shell actually used to fix them. `0` trusts the
+  recording.
 
 ## Development
 
