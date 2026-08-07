@@ -677,6 +677,11 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
       const body = t.text.trimEnd();
       if (body === "" || titleCwdShape.test(body)) continue;
       cmds[k].command = body;
+      // The on-screen row was empty at submit -- whatever `line` (from the
+      // input mark) points to is a stale row from earlier in an edit dance,
+      // not this command's. Anchor the output window on the submit itself
+      // instead, or a stale lineByte sweeps in unrelated leftover content.
+      cmds[k].lineByte = cmds[k].submitByte;
       break;
     }
   }
