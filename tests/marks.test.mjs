@@ -186,6 +186,49 @@ test("a title-derived command still anchors its output window correctly", async 
   assert.equal(entry.output, "real output", "only this command's own output, not the earlier stale content");
 });
 
+test("the last tracked command's output stops at a dangling input mark", async () => {
+  // A session can drop into a program that doesn't emit the local shell's
+  // bracketed-paste markers (an interactive remote shell, e.g.) and never
+  // come back -- so the *last* command extraction can see has no closing
+  // boundary from a next command at all. Without a fallback, its output
+  // window swallows the rest of the file, however long that is. Found via a
+  // real capture: `cd optimum` absorbed an entire unrelated `evil-winrm`
+  // session against a different machine that happened to follow it.
+  const body =
+    `$ ${ESC}[?2004hcd optimum${ESC}[?2004l\r\n` +
+    `own output\r\n` +
+    `$ ${ESC}[?2004h` + // a new prompt starts reading input -- but never submits
+    `whoami\r\n` + // typed into an untracked remote shell
+    `remote-shell-output\r\n`;
+  const s = await session(body);
+  const entry = s.entries.find(e => e.command === "cd optimum");
+  assert.ok(entry);
+  assert.equal(entry.output, "own output", "the dangling input mark bounds the window, not the end of the file");
+});
+
+test("a same-row retry doesn't erase the previous attempt's brief output", async () => {
+  // A fast retry loop can jump the cursor back onto an earlier prompt's own
+  // row and retype directly over it, with no scroll in between -- but the
+  // interrupted attempt's output (its `^C` echo, e.g.) can still be sitting
+  // a row or two below that point, about to be clobbered by the retype.
+  // xterm.js only exposes the *final* settled state of each row, so unlike a
+  // real terminal (which a human watching would have seen this on), that
+  // content has to be captured at the moment it's still there or it's gone
+  // for good. Found via a real capture with a burst of `^C`-interrupted
+  // retries of the same command.
+  const body =
+    `$ ${ESC}[?2004hfirst${ESC}[?2004l\r\n` + // submit; cursor moves to a fresh row
+    `^C\r\n` + // the interrupted attempt's brief output, one row down
+    `${ESC}[A${ESC}[A` + // jump back up onto "first"'s own prompt row (no scroll)
+    `$ ${ESC}[?2004hsecond${ESC}[?2004l\r\n` +
+    `real output\r\n`;
+  const s = await session(body);
+  const cmds = s.entries.map(e => e.command);
+  assert.deepEqual(cmds, ["first", "second"]);
+  assert.equal(s.entries[0].output, "^C", "the interrupted attempt's output survives the same-row retype");
+  assert.equal(s.entries[1].output, "real output", "the retry's own output is unaffected");
+});
+
 test("without marks, extraction falls back to the prompt regex", async () => {
   // No 2004h/2004l and no OSC 133 -> the dispatcher uses the regex path.
   const { lines, titles, marks } = await replay(
