@@ -592,6 +592,28 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
   }
   if (!cmds.length) return [];
 
+  // A screen-scraped command can come out empty even though the shell really
+  // ran something: a completion/history widget can blank the input row as
+  // part of its redraw dance an instant before Enter, so there is nothing
+  // left on screen to read at submit. Many shells (zsh's preexec hook, e.g.)
+  // set the window title (OSC 2) to the literal command right as it starts —
+  // when the on-screen text is empty, that title is the only surviving
+  // record of what actually ran, so fall back to it rather than discarding
+  // a real command as a noise (bare-Enter) entry.
+  const titleCwdShape = /^[^\s@]+@[^\s@]+:\s?/;
+  for (let k = 0; k < cmds.length; k++) {
+    if (cmds[k].command !== "") continue;
+    const hi = k + 1 < cmds.length ? cmds[k + 1].boundaryByte : Infinity;
+    for (const t of titles) {
+      if (t.byte <= cmds[k].submitByte || t.byte > hi) continue;
+      if (!t.text.startsWith("2;")) continue;
+      const body = t.text.slice(2).trimEnd();
+      if (body === "" || titleCwdShape.test(body)) continue;
+      cmds[k].command = body;
+      break;
+    }
+  }
+
   // Working directory over time, from OSC window titles ("user@host: <cwd>")
   // and two-line-prompt banners, looked up by byte at each command.
   const cwdEvents: { byte: number; cwd: string }[] = [];

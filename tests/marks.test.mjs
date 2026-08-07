@@ -123,6 +123,35 @@ test("an explicit width override replaces the recording's header COLUMNS", () =>
   assert.equal(s.entries.find(e => e.command.startsWith("ls")).command, "ls -la");
 });
 
+test("a blanked input row falls back to the shell's own title for the command", () => {
+  // A completion/history widget can erase the input row as part of its own
+  // redraw dance an instant before Enter, so nothing is left on screen at
+  // submit even though the shell really ran something. Found in a real
+  // capture: `net rpc group addmem "EXCHANGE WINDOWS PERMISSIONS" ... -I ...`
+  // vanished from the reconstruction entirely (silently classed as a
+  // bare-Enter no-op) because the row was blank at the exact submit byte.
+  // zsh's preexec hook sets the window title (OSC 2) to the literal command
+  // right as it starts, so it survives even when the screen doesn't.
+  const cmd = 'net rpc group addmem "EXCHANGE WINDOWS PERMISSIONS" "svc-alfresco"';
+  const block =
+    `$ ${ESC}[?2004h${cmd}\r${ESC}[K${ESC}[?2004l\r\n` + // typed, then the row is wiped before submit
+    `${ESC}]2;${cmd}${ESC}\\` + // the shell's own record of what it ran
+    `ok\r\n`;
+  const s = session(block);
+  const entry = s.entries.find(e => e.command === cmd);
+  assert.ok(entry, "the title-derived command is recovered instead of dropped as noise");
+  assert.equal(entry.noise, false);
+});
+
+test("a blanked input row with no usable title stays noise, not garbage", () => {
+  // Same blanked-row shape, but the following title is the idle "user@host:
+  // cwd" one (no command actually ran) -- must not be mistaken for a command.
+  const block = `$ ${ESC}[?2004h${ESC}[?2004l\r\n${ESC}]2;user@host: ~${ESC}\\`;
+  const s = session(block);
+  const real = s.entries.filter(e => !e.noise);
+  assert.equal(real.length, 0, "the idle cwd title is never mistaken for a command");
+});
+
 test("without marks, extraction falls back to the prompt regex", () => {
   // No 2004h/2004l and no OSC 133 -> the dispatcher uses the regex path.
   const { lines, titles, marks } = replay(
