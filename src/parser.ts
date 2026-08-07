@@ -266,28 +266,33 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, resize
   }
 
   /**
-   * Reshape the grid to a new size, keeping the content that still fits. No
-   * historical reflow (xterm does that; we don't need it) — the shell redraws
-   * its current line on SIGWINCH, and already-scrolled rows are committed at
-   * their old width. What matters is that wrapping *after* this point uses the
-   * size the shell now sees, so a post-resize redraw reconstructs correctly.
+   * Reshape the grid to a new size. No historical reflow (xterm does that; we
+   * don't need it) — the shell redraws its current line on SIGWINCH. What
+   * matters is that wrapping *after* this point uses the size the shell now
+   * sees, so a post-resize redraw reconstructs correctly.
+   *
+   * Content still sitting in the live grid — anything that hasn't scrolled
+   * off yet — is session history the same as a committed row; on a tall
+   * terminal most of the session can still be "on screen" at any given
+   * moment. Copying it cell-by-cell into a narrower/shorter grid silently
+   * truncated or dropped whole rows of already-finished output the instant a
+   * resize shrank either dimension — found via a real capture whose `ls`
+   * output got chopped mid-line by a resize that happened commands later.
+   * Flushing to history first (the same move clearScreen() makes for a full
+   * erase) loses nothing: the shell's post-SIGWINCH redraw rebuilds whatever
+   * is still live.
    */
   function doResize(nc: number, nr: number) {
     nc = Math.max(20, nc | 0 || cols);
     nr = Math.max(4, nr | 0 || rows);
     if (nc === cols && nr === rows) return;
-    const ng: string[][] = Array.from({ length: nr }, () => Array(nc).fill(" "));
-    const nw: boolean[] = Array(nr).fill(false);
-    const nb: number[] = Array(nr).fill(pos);
-    for (let y = 0; y < Math.min(nr, rows); y++) {
-      for (let x = 0; x < Math.min(nc, cols); x++) ng[y][x] = grid[y][x];
-      if (nc === cols) nw[y] = wrap[y]; // continuation flags only survive an unchanged width
-      nb[y] = rowByte[y];
-    }
-    grid = ng; wrap = nw; rowByte = nb;
+    commitScreen();
+    grid = Array.from({ length: nr }, () => Array(nc).fill(" "));
+    wrap = Array(nr).fill(false);
+    rowByte = Array(nr).fill(pos);
     cols = nc; rows = nr;
-    cx = Math.min(cx, nc - 1); cy = Math.min(cy, nr - 1);
-    top = 0; bot = nr - 1; pendingWrap = false;
+    cx = 0; cy = 0; top = 0; bot = nr - 1; pendingWrap = false;
+    inputRow = -1; // any in-progress input row is gone; the shell's redraw re-establishes it
   }
 
   const n = bytes.length;
