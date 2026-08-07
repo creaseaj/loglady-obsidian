@@ -134,6 +134,12 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   // via getLine(). inputByte is the ordering-key counterpart (see rowAt()),
   // carried into the input/submit marks' `byte`/`line` fields.
   let inputRow = -1, inputCol = 0, inputByte = -1;
+  // The raw row at the most recent submit, so a same-row re-arm (see
+  // armInput()) only snapshots what actually changed since then -- not the
+  // whole viewport, which would drag in unrelated content sitting in rows
+  // above that never got touched (a `--help` dump, e.g.) into every command
+  // downstream of it.
+  let lastSubmitRow = -1;
 
   // A full erase (`clear`'s ESC[H ESC[2J) or a full reset (RIS) doesn't scroll
   // anything into xterm.js's scrollback -- it just blanks the viewport in
@@ -183,10 +189,10 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
    * which -- unlike a natural bottom-margin scroll -- xterm.js does not feed
    * to real scrollback).
    */
-  function preserveRows(count: number) {
+  function preserveRange(fromY: number, toY: number) {
     const buf = term.buffer.active;
     let cur: { text: string; byte: number } | null = null;
-    for (let y = 0; y < count; y++) {
+    for (let y = Math.max(0, fromY); y <= toY; y++) {
       const line = buf.getLine(buf.baseY + y);
       const text = line ? line.translateToString(false) : "";
       if (line && line.isWrapped && cur) cur.text += text;
@@ -196,6 +202,7 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
     rowOffset += EPOCH_STEP;
     breakpoints.push({ atBaseY: buf.baseY, rowOffset });
   }
+  function preserveRows(count: number) { preserveRange(0, count - 1); }
   function preserveViewport() {
     const buf = term.buffer.active;
     let last = -1;
@@ -228,9 +235,32 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   }
 
   function armInput() {
-    inputRow = rawRowAt(); inputCol = term.buffer.active.cursorX;
+    // If the row hasn't advanced since the last submit, a retry widget is
+    // about to retype directly over whatever's on screen right now -- a
+    // brief command output, a `^C` from an interrupted attempt -- with no
+    // scroll to carry it into xterm.js's scrollback naturally. Only the
+    // *final* state of each row survives to the end-of-replay buffer read,
+    // so unlike a real terminal (where a human watching would have seen
+    // it), that content is gone for good the instant it's overwritten
+    // unless it's captured right now. Snapshot the span from the last
+    // submit's row through the bottom of the viewport (not just to the
+    // cursor's current row -- a retry can jump the cursor back up to the
+    // prompt row while real output it's about to clobber still sits a row
+    // or two below it) -- but not the whole viewport from the top, via
+    // preserveViewport(): rows above the last submit never scrolled either,
+    // but also never changed (a `--help` dump sitting higher up, e.g.) and
+    // aren't part of what this command produced.
+    const buf = term.buffer.active;
+    const bufRow = buf.baseY + buf.cursorY; // xterm.js's own buffer index -- independent of rowOffset
+    if (isNormal() && rowOffset + bufRow <= lastRowAt && lastSubmitRow >= 0) {
+      // preserveRange() bumps rowOffset, so anything computed against the
+      // *old* rowOffset before this point (raw row-at values) must not be
+      // reused afterward -- bufRow itself is untouched by it, though.
+      preserveRange(lastSubmitRow - buf.baseY, term.rows - 1);
+    }
+    inputRow = rowOffset + bufRow; inputCol = buf.cursorX;
     inputByte = rowAt();
-    const line = term.buffer.active.getLine(inputRow - rowOffset);
+    const line = buf.getLine(bufRow);
     marks.push({ kind: "input", byte: inputByte, prompt: line ? line.translateToString(false, 0, inputCol) : "" });
   }
   function fireSubmit() {
@@ -248,8 +278,13 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
     // after a long in-place-redraw edit history (repeated CR-then-retype
     // with no scroll) and started sweeping unrelated earlier content into
     // the window -- anchoring on the submit itself needs no history at all.
-    const line = term.buffer.active.cursorX === 0 ? byte - 1e-7 : byte;
+    const buf = term.buffer.active;
+    const line = buf.cursorX === 0 ? byte - 1e-7 : byte;
     marks.push({ kind: "submit", byte, command: commandAtSubmit(), line });
+    // Pure buffer index (no rowOffset), valid for armInput()'s viewport-
+    // relative preserveRange() call as long as nothing scrolls in between --
+    // exactly the condition that call itself checks for.
+    lastSubmitRow = buf.baseY + buf.cursorY;
     inputRow = -1; inputByte = -1;
   }
 
