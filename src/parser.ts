@@ -130,7 +130,10 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   const preserved: ParsedLine[] = [];
   // Where the current command line began (cursor just past the prompt), set at
   // the input mark and read back at submit to lift the command off the screen.
-  let inputRow = -1, inputCol = 0;
+  // inputRow is the exact, un-nudged row -- it's used as a real buffer index
+  // via getLine(). inputByte is the ordering-key counterpart (see rowAt()),
+  // carried into the input/submit marks' `byte`/`line` fields.
+  let inputRow = -1, inputCol = 0, inputByte = -1;
 
   // A full erase (`clear`'s ESC[H ESC[2J) or a full reset (RIS) doesn't scroll
   // anything into xterm.js's scrollback -- it just blanks the viewport in
@@ -151,7 +154,25 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   const breakpoints: { atBaseY: number; rowOffset: number }[] = [{ atBaseY: 0, rowOffset: 0 }];
 
   const isNormal = (): boolean => term.buffer.active.type === "normal";
-  const rowAt = (): number => rowOffset + term.buffer.active.baseY + term.buffer.active.cursorY;
+  const rawRowAt = (): number => rowOffset + term.buffer.active.baseY + term.buffer.active.cursorY;
+  // The terminal's current row is not a unique ordinal on its own: repeated
+  // CR-then-redraw-in-place edits (history/completion widgets, seen in real
+  // captures) can revisit the exact same absolute row for multiple genuinely
+  // distinct events with no scroll between them. Two submits landing on an
+  // identical row collapsed into duplicate entries sharing one byte value,
+  // each computing an ambiguous/overlapping output window. Nudge forward by
+  // an epsilon whenever the raw row doesn't strictly advance, so every mark
+  // still gets a unique, correctly-ordered key -- comparisons against a
+  // line's plain integer row index are unaffected since the nudge never
+  // reaches a whole row. This is for `byte`/ordering fields only -- never use
+  // it as a buffer row index (getLine wants the exact, un-nudged row).
+  let lastRowAt = -Infinity;
+  const rowAt = (): number => {
+    const raw = rawRowAt();
+    const v = raw > lastRowAt ? raw : lastRowAt + 1e-6;
+    lastRowAt = v;
+    return v;
+  };
 
   /**
    * Snapshot `count` rows starting at the current viewport's top (relative
@@ -207,15 +228,15 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   }
 
   function armInput() {
-    const byte = rowAt();
-    inputRow = byte; inputCol = term.buffer.active.cursorX;
-    const line = term.buffer.active.getLine(byte - rowOffset);
-    marks.push({ kind: "input", byte, prompt: line ? line.translateToString(false, 0, inputCol) : "" });
+    inputRow = rawRowAt(); inputCol = term.buffer.active.cursorX;
+    inputByte = rowAt();
+    const line = term.buffer.active.getLine(inputRow - rowOffset);
+    marks.push({ kind: "input", byte: inputByte, prompt: line ? line.translateToString(false, 0, inputCol) : "" });
   }
   function fireSubmit() {
     const byte = rowAt();
-    marks.push({ kind: "submit", byte, command: commandAtSubmit(), line: inputRow >= 0 ? inputRow : byte });
-    inputRow = -1;
+    marks.push({ kind: "submit", byte, command: commandAtSubmit(), line: inputByte >= 0 ? inputByte : byte });
+    inputRow = -1; inputByte = -1;
   }
 
   const disposables: { dispose(): void }[] = [];
@@ -452,6 +473,11 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
       const body = t.text.trimEnd();
       if (body === "" || titleCwdShape.test(body)) continue;
       cmds[k].command = body;
+      // The on-screen row was empty at submit -- whatever `line` (from the
+      // input mark) points to is a stale row from earlier in an edit dance,
+      // not this command's. Anchor the output window on the submit itself
+      // instead, or a stale lineByte sweeps in unrelated leftover content.
+      cmds[k].lineByte = cmds[k].submitByte;
       break;
     }
   }
