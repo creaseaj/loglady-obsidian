@@ -152,6 +152,40 @@ test("a blanked input row with no usable title stays noise, not garbage", async 
   assert.equal(real.length, 0, "the idle cwd title is never mistaken for a command");
 });
 
+test("two submits on the exact same screen row don't collapse into one", async () => {
+  // A history/completion widget can redraw entirely via CR (no linefeed), so
+  // two genuinely distinct submits land on the identical absolute row with no
+  // scroll between them. xterm.js's current row is not a unique ordinal by
+  // itself, so both submits used to get the same byte -- silently merging two
+  // real commands into a single ambiguous entry with an unresolvable output
+  // window. Found via a real capture with heavy in-place history editing.
+  const ST = `${ESC}\\`;
+  const block =
+    `${ESC}]133;A${ST}$ ${ESC}]133;B${ST}first${ESC}]133;C${ST}\r` + // CR only: same row
+    `${ESC}]133;A${ST}$ ${ESC}]133;B${ST}second${ESC}]133;C${ST}\r\n`;
+  const s = await session(block);
+  const cmds = s.entries.map(e => e.command);
+  assert.deepEqual(cmds, ["first", "second"]);
+  assert.notEqual(s.entries[0].byte, s.entries[1].byte, "each submit gets its own ordering key");
+});
+
+test("a title-derived command still anchors its output window correctly", async () => {
+  // The screen-scraped command's own row is stale/meaningless once we've
+  // fallen back to the title (see above) -- anchoring the output window on it
+  // anyway swept in unrelated leftover content from earlier in the same edit
+  // marathon. The window must start fresh at the submit itself.
+  const cmd = 'net rpc group addmem "EXCHANGE WINDOWS PERMISSIONS" "svc-alfresco"';
+  const block =
+    `stale leftover content\r\n` + // sits on an early row that inputRow would stale-point to
+    `$ ${ESC}[?2004h${cmd}\r${ESC}[K${ESC}[?2004l\r\n` +
+    `${ESC}]2;${cmd}${ESC}\\` +
+    `real output\r\n`;
+  const s = await session(block);
+  const entry = s.entries.find(e => e.command === cmd);
+  assert.ok(entry);
+  assert.equal(entry.output, "real output", "only this command's own output, not the earlier stale content");
+});
+
 test("without marks, extraction falls back to the prompt regex", async () => {
   // No 2004h/2004l and no OSC 133 -> the dispatcher uses the regex path.
   const { lines, titles, marks } = await replay(
