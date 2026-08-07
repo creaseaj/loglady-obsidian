@@ -95,14 +95,21 @@ const DEC_GRAPHICS = [
 export const DEFAULT_PROMPT_RE = String.raw`└─[$#]\s?(.*)$`;
 export const DEFAULT_CWD_RE = String.raw`┌──\(.*?\)-\[(.*?)\]`;
 
+/** A terminal resize recovered from a script(1) advanced-format timing file. */
+export interface Resize {
+  byte: number; // body-byte offset at which the resize took effect
+  cols: number;
+  rows: number;
+}
+
 /* ---------------------------------------------------------------------------
  * Terminal emulator — replay a script(1) typescript body into clean lines.
  * Operates on raw bytes so we can (a) decode UTF-8 and (b) map each output
  * line back to a byte offset for timestamping via the timing file.
  * ------------------------------------------------------------------------- */
-export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): ReplayResult {
-  const cols = Math.max(20, colsIn | 0 || 80);
-  const rows = Math.max(4, rowsIn | 0 || 24);
+export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, resizes: Resize[] = []): ReplayResult {
+  let cols = Math.max(20, colsIn | 0 || 80);
+  let rows = Math.max(4, rowsIn | 0 || 24);
   const blank = (): string[] => Array(cols).fill(" ");
   let grid: string[][] = Array.from({ length: rows }, blank);
   let wrap: boolean[] = Array(rows).fill(false);
@@ -114,6 +121,11 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   // Where the current command line began (cursor just past the prompt), set at
   // the input mark and read back at submit to lift the command off the screen.
   let inputRow = -1, inputCol = 0;
+  // Pending resizes (from an advanced-format timing file), applied when the
+  // stream reaches each one's byte so wrapping matches the terminal the shell
+  // actually saw — otherwise a mid-session resize desyncs every wrapped redraw.
+  const pendingResizes = resizes.slice().sort((a, b) => a.byte - b.byte);
+  let ri2 = 0;
 
   let pos = 0;
   // Alternate screen buffer (DECSET 1049/1047/47): full-screen programs draw
@@ -247,11 +259,39 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
     if (cx >= cols) { cx = cols - 1; pendingWrap = autowrap; }
   }
 
+  /**
+   * Reshape the grid to a new size, keeping the content that still fits. No
+   * historical reflow (xterm does that; we don't need it) — the shell redraws
+   * its current line on SIGWINCH, and already-scrolled rows are committed at
+   * their old width. What matters is that wrapping *after* this point uses the
+   * size the shell now sees, so a post-resize redraw reconstructs correctly.
+   */
+  function doResize(nc: number, nr: number) {
+    nc = Math.max(20, nc | 0 || cols);
+    nr = Math.max(4, nr | 0 || rows);
+    if (nc === cols && nr === rows) return;
+    const ng: string[][] = Array.from({ length: nr }, () => Array(nc).fill(" "));
+    const nw: boolean[] = Array(nr).fill(false);
+    const nb: number[] = Array(nr).fill(pos);
+    for (let y = 0; y < Math.min(nr, rows); y++) {
+      for (let x = 0; x < Math.min(nc, cols); x++) ng[y][x] = grid[y][x];
+      if (nc === cols) nw[y] = wrap[y]; // continuation flags only survive an unchanged width
+      nb[y] = rowByte[y];
+    }
+    grid = ng; wrap = nw; rowByte = nb;
+    cols = nc; rows = nr;
+    cx = Math.min(cx, nc - 1); cy = Math.min(cy, nr - 1);
+    top = 0; bot = nr - 1; pendingWrap = false;
+  }
+
   const n = bytes.length;
   let i = 0;
   while (i < n) {
     const b = bytes[i];
     pos = i;
+    while (ri2 < pendingResizes.length && pendingResizes[ri2].byte <= i) {
+      doResize(pendingResizes[ri2].cols, pendingResizes[ri2].rows); ri2++;
+    }
     if (b === 0x1b) { // ESC
       const nx = bytes[i + 1];
       if (nx === 0x5b) { // CSI '['
@@ -430,19 +470,35 @@ export function replay(bytes: Uint8Array, colsIn: number, rowsIn: number): Repla
   return { lines, titles, marks };
 }
 
+/** True for a util-linux "advanced" timing log (typed records) vs the classic
+ *  "<delay> <bytes>" lines. */
+function isAdvancedTiming(timeText: string): boolean {
+  return /^[HIOS]\s/m.test(timeText);
+}
+
 /* ---------------------------------------------------------------------------
  * Timing file -> map body byte offset to elapsed seconds.
- * Each line: "<delay> <bytes>". Bytes accumulate over the replayed body.
+ * Classic: "<delay> <bytes>". Advanced: "O <delay> <bytes>" for output, with
+ * H/I/S records interleaved — only O bytes land in the output log, but every
+ * record's delay is elapsed time, so non-output waits fold into the next O.
  * ------------------------------------------------------------------------- */
 export function buildTiming(timeText: string | null): ((offset: number) => number) | null {
   if (!timeText) return null;
+  const advanced = isAdvancedTiming(timeText);
   const cumB = [0], cumT = [0];
   let b = 0, t = 0;
   for (const raw of timeText.split(/\r?\n/)) {
-    const m = raw.match(/^\s*([0-9]*\.?[0-9]+)\s+([0-9]+)\s*$/);
-    if (!m) continue;
-    t += parseFloat(m[1]); b += parseInt(m[2], 10);
-    cumT.push(t); cumB.push(b);
+    if (advanced) {
+      const m = raw.match(/^([HIOS])\s+([0-9]*\.?[0-9]+)(?:\s+([0-9]+))?/);
+      if (!m) continue;
+      t += parseFloat(m[2]);
+      if (m[1] === "O" && m[3]) { b += parseInt(m[3], 10); cumT.push(t); cumB.push(b); }
+    } else {
+      const m = raw.match(/^\s*([0-9]*\.?[0-9]+)\s+([0-9]+)\s*$/);
+      if (!m) continue;
+      t += parseFloat(m[1]); b += parseInt(m[2], 10);
+      cumT.push(t); cumB.push(b);
+    }
   }
   if (cumB.length < 2) return null;
   return function elapsedAt(offset: number): number {
@@ -454,6 +510,26 @@ export function buildTiming(timeText: string | null): ((offset: number) => numbe
     const frac = b1 > b0 ? (offset - b0) / (b1 - b0) : 0;
     return t0 + frac * (t1 - t0);
   };
+}
+
+/**
+ * Terminal resizes from an advanced-format timing log, as body-byte offsets.
+ * `S <delay> SIGWINCH ROWS=<r> COLS=<c>` records sit between the O records, so
+ * a resize's offset is the output bytes emitted before it — exactly where the
+ * shell's SIGWINCH redraw begins in the reconstructed body. Classic logs carry
+ * no resize information, so this is empty for them.
+ */
+export function parseResizes(timeText: string | null): Resize[] {
+  if (!timeText || !isAdvancedTiming(timeText)) return [];
+  const out: Resize[] = [];
+  let b = 0;
+  for (const raw of timeText.split(/\r?\n/)) {
+    const o = raw.match(/^O\s+[0-9.]+\s+([0-9]+)/);
+    if (o) { b += parseInt(o[1], 10); continue; }
+    const s = raw.match(/^S\s+[0-9.]+\s+SIGWINCH\s+ROWS=([0-9]+)\s+COLS=([0-9]+)/);
+    if (s) out.push({ byte: b, rows: parseInt(s[1], 10), cols: parseInt(s[2], 10) });
+  }
+  return out;
 }
 
 function parseWhen(s: string): number | null {
@@ -639,7 +715,8 @@ export function parseSession(name: string, bytes: Uint8Array, timeText: string |
   const startEpoch = parseWhen(started);
   const endEpoch = parseWhen(done);
   const timing = buildTiming(timeText);
-  const { lines, titles, marks } = replay(body, cols, rows);
+  const resizes = parseResizes(timeText);
+  const { lines, titles, marks } = replay(body, cols, rows, resizes);
   const entries = extractEntries(lines, titles, marks, promptSrc, cwdSrc);
 
   for (const e of entries) {

@@ -18,6 +18,18 @@ Record a session with:
 script --timing=time.log shell.log
 ```
 
+If you might **resize the terminal** (or tmux pane) while recording, use
+util-linux's advanced timing format instead — it records the resizes, so
+LogLady can re-wrap correctly and long commands recalled after a resize don't
+get garbled:
+
+```
+script --logging-format advanced -T time.log shell.log
+```
+
+(With the classic format above, keep the window a fixed size for the whole
+recording; a mid-session resize can't be recovered from a classic log.)
+
 Then open the **LogLady panel** — the ribbon icon (terminal glyph), or the
 command **LogLady: Open panel** — a persistent pane in the left sidebar that
 stays open while you work. In the panel you can:
