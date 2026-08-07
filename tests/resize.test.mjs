@@ -63,6 +63,20 @@ test("a resize rescues a redraw that a fixed width would mangle", () => {
   assert.ok(narrow.join("").endsWith("bbbb"), "and the edited tail is kept");
 });
 
+test("a resize doesn't truncate output that was already on screen", () => {
+  // On a tall terminal most of the session stays "on screen" (unscrolled) for
+  // a long time. A real capture had an `ls` listing written at COLUMNS=476,
+  // then several commands later a mid-session resize narrowed to COLS=236 —
+  // and the still-unscrolled `ls` line got chopped at the new, narrower width
+  // even though it was written and finished long before the resize happened.
+  const longLine = "x".repeat(300); // fits at 400 cols, would wrap/truncate at 100
+  const body = longLine + "\r\n" + "y".repeat(50) + "\r\n";
+  const resizeAt = longLine.length + 2 + 10; // well after the long line is committed
+  const { lines } = replay(enc(body), 400, 50, [{ byte: resizeAt, cols: 100, rows: 50 }]);
+  const text = lines.map(l => l.text).join("");
+  assert.ok(text.includes(longLine), "the pre-resize line survives the later narrower resize intact");
+});
+
 test("resize matches xterm.js reflow for content written after the change", async () => {
   const pre = "line-at-wide-width\r\n";
   const post = "x".repeat(50) + "\r\n"; // wraps only at the narrow width
