@@ -235,7 +235,21 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   }
   function fireSubmit() {
     const byte = rowAt();
-    marks.push({ kind: "submit", byte, command: commandAtSubmit(), line: inputByte >= 0 ? inputByte : byte });
+    // Where output can safely start: normally the command's own text still
+    // occupies the current row at submit, so output starts strictly after it
+    // (`line: byte`, excluded by extraction's `>` comparison). But a shell
+    // that emits its own newline before the paste-off marker (smbclient,
+    // ftp, ...) already has the cursor at the start of a *fresh* row by
+    // submit -- that row can already hold real output, so nudge `line` just
+    // under it instead, or its first output line gets excluded too.
+    //
+    // This used to instead reach back to inputByte (the row where typing
+    // began) to solve exactly the smbclient case, but that row goes stale
+    // after a long in-place-redraw edit history (repeated CR-then-retype
+    // with no scroll) and started sweeping unrelated earlier content into
+    // the window -- anchoring on the submit itself needs no history at all.
+    const line = term.buffer.active.cursorX === 0 ? byte - 1e-7 : byte;
+    marks.push({ kind: "submit", byte, command: commandAtSubmit(), line });
     inputRow = -1; inputByte = -1;
   }
 
@@ -473,11 +487,6 @@ export function extractEntriesFromMarks(lines: ParsedLine[], titles: ParsedTitle
       const body = t.text.trimEnd();
       if (body === "" || titleCwdShape.test(body)) continue;
       cmds[k].command = body;
-      // The on-screen row was empty at submit -- whatever `line` (from the
-      // input mark) points to is a stale row from earlier in an edit dance,
-      // not this command's. Anchor the output window on the submit itself
-      // instead, or a stale lineByte sweeps in unrelated leftover content.
-      cmds[k].lineByte = cmds[k].submitByte;
       break;
     }
   }
