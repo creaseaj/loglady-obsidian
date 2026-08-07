@@ -105,7 +105,7 @@ export class LogLadyView extends ItemView {
       const sig = sessionSig(g.shell.name, g.shell.bytes, timeText);
       if (this.loaded.has(sig)) { skipped++; continue; } // identical log already loaded
       this.loaded.add(sig);
-      this.sessions.push(parseSession(g.shell.name, g.shell.bytes, timeText, this.plugin.settings.promptRe, this.plugin.settings.cwdRe, this.plugin.settings.assumedWidth));
+      this.sessions.push(await parseSession(g.shell.name, g.shell.bytes, timeText, this.plugin.settings.promptRe, this.plugin.settings.cwdRe, this.plugin.settings.assumedWidth));
       added++;
     }
     if (added && skipped) new Notice(`Loaded ${added} session${added > 1 ? "s" : ""}; skipped ${skipped} already loaded`);
