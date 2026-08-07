@@ -180,6 +180,19 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
     return v;
   };
 
+  // When each row (keyed by xterm.js's own stable buffer index -- assigned
+  // once a row is created and never reused, live or already scrolled) was
+  // last written to. Without this, the final buffer read-out below has to
+  // fall back to "whatever rowOffset is right now" for every row still live
+  // in the viewport, uniformly -- but a tall terminal can hold rows from
+  // wildly different points in the session at once (nothing forces old
+  // content to scroll away), so a command near the end of a session can end
+  // up absorbing everything still visible above it, however unrelated.
+  // Found via a real capture where the last tracked command's output pulled
+  // in leftover text from a much earlier, unrelated part of the same
+  // session that simply hadn't scrolled off the 50-row viewport yet.
+  const rowByte = new Map<number, number>();
+
   /**
    * Snapshot `count` rows starting at the current viewport's top (relative
    * rows 0..count-1) into `preserved`, then bump rowOffset so nothing written
@@ -201,6 +214,20 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
     if (cur) { cur.text = cur.text.replace(/\s+$/, ""); preserved.push(cur); }
     rowOffset += EPOCH_STEP;
     breakpoints.push({ atBaseY: buf.baseY, rowOffset });
+    // The rows just preserved are about to be reused (an in-place erase
+    // doesn't scroll, so the same absolute rows get written again under the
+    // new epoch) but checkRows()'s window is a span from wherever it last
+    // looked to wherever the cursor ends up *next* time it runs -- built
+    // assuming the cursor only moves forward between checkpoints. A `clear`
+    // breaks that assumption: it snaps the cursor back up near the top of
+    // the viewport mid-batch, so without this the next checkRows() call
+    // anchors its span to a stale, far-too-high pre-clear cursor row and
+    // never looks back down here at all -- these rows keep whatever rowByte
+    // a prior checkpoint gave them under the old epoch forever, even once
+    // they're holding entirely new content. Anchoring to the reset cursor
+    // position (already applied by the erase's own CSI H by the time this
+    // runs) makes the next checkRows() span start from here instead.
+    lastCheckedRow = buf.baseY + buf.cursorY;
   }
   function preserveRows(count: number) { preserveRange(0, count - 1); }
   function preserveViewport() {
@@ -251,16 +278,23 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
     // ordinary scrolling can happen between the last real submit and this
     // one (this command's own output, e.g.) with no other event updating
     // lastSubmitRow in between, so it can be thousands of rows stale by the
-    // time a same-row collision (checked against the *current* row via
-    // lastRowAt, which every mark/title keeps fresh) actually happens --
-    // an uncapped range would then sweep in the entire viewport, including
-    // unrelated, already-frozen content sitting far above (a `--help` dump
-    // the cursor jumps around inside of, e.g.) that was never part of what
-    // any of these commands produced.
+    // time a same-row collision actually happens -- an uncapped range would
+    // then sweep in the entire viewport, including unrelated,
+    // already-frozen content sitting far above (a `--help` dump the cursor
+    // jumps around inside of, e.g.) that was never part of what any of
+    // these commands produced.
     const MARGIN = 4;
     const buf = term.buffer.active;
     const bufRow = buf.baseY + buf.cursorY; // xterm.js's own buffer index -- independent of rowOffset
-    if (isNormal() && rowOffset + bufRow <= lastRowAt && lastSubmitRow >= 0) {
+    // Compared against lastSubmitRow specifically, not lastRowAt: lastRowAt
+    // is refreshed by *every* mark and title, including this same command's
+    // own prompt-start, so back when this compared against it, a brand new
+    // command whose prompt simply landed on the same row as the *previous*
+    // command's own exit marker -- completely normal for compact OSC 133
+    // output with no blank line between commands -- was misread as a
+    // same-row retry, spuriously duplicating that previous command's output
+    // into this one's preserved range too.
+    if (isNormal() && bufRow <= lastSubmitRow && lastSubmitRow >= 0) {
       // preserveRange() bumps rowOffset, so anything computed against the
       // *old* rowOffset before this point (raw row-at values) must not be
       // reused afterward -- bufRow itself is untouched by it, though.
@@ -300,6 +334,71 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   }
 
   const disposables: { dispose(): void }[] = [];
+  const rowText = new Map<number, string>(); // last-seen text, to tell a write from a bare cursor move
+  // Check a window of rows for text that's actually changed since we last
+  // looked, and stamp only those into rowByte. Called after every
+  // newline-chunked write() below (xterm.js's onCursorMove fires once per
+  // write() call, not per row -- for a single whole-file write it told us
+  // nothing) -- so this is the actual per-row write clock.
+  //
+  // The window spans from the cursor row at the *previous* call to the
+  // cursor row at *this* call (plus a margin on both ends), not just a fixed
+  // margin around wherever the cursor ends up now. A batch of writes between
+  // two checkpoints can pass through rows the cursor has since moved well
+  // past -- most commonly a `clear` resetting the cursor back near the top
+  // of the viewport partway through a batch, reusing rows a plain
+  // cursor-only margin would never look at again once the batch moved on.
+  // A first version checked only `cursorY ± ROW_CHECK_MARGIN` at each
+  // checkpoint and silently missed exactly those rows: they'd been visited
+  // and left behind earlier in the same batch, so by the time this ran their
+  // stale rowByte (from whatever wrote them last, one or more clears ago)
+  // never got refreshed, and the row sorted into the wrong command entirely.
+  // The margin on both ends of the span still covers absolute-position
+  // redraws (`ESC[A`, `ESC[125C`, ...) landing slightly outside it, same as
+  // armInput()'s collision preserve.
+  const ROW_CHECK_MARGIN = 5;
+  let lastCheckedRow = -1;
+  function checkRows() {
+    if (!isNormal()) return;
+    const buf = term.buffer.active;
+    const cursorY = buf.baseY + buf.cursorY;
+    const anchor = lastCheckedRow < 0 ? cursorY : lastCheckedRow;
+    // Never reach below buf.baseY: those rows already scrolled into real
+    // scrollback and are immutable -- nothing can write to them again, so
+    // they're stuck with whatever they were last observed as. A stale
+    // anchor (e.g. left over from before a clear, or from long before a lot
+    // of natural scrolling happened) can point well below the current
+    // viewport; without this clamp, a row that scrolled off screen before
+    // checkRows ever got a chance to look at it gets "first observed" here
+    // instead, and stamped with *this* call's current epoch -- an epoch
+    // that has nothing to do with when the row was actually written. Rows
+    // already in scrollback are correctly handled by offsetFor()'s
+    // breakpoint-based fallback instead; this only needs to track the
+    // still-live viewport, which is the only place a write can still land.
+    const lo = Math.max(buf.baseY, Math.min(cursorY, anchor) - ROW_CHECK_MARGIN);
+    const hi = Math.max(cursorY, anchor) + ROW_CHECK_MARGIN;
+    lastCheckedRow = cursorY;
+    for (let y = lo; y <= hi; y++) {
+      const line = buf.getLine(y);
+      const text = line ? line.translateToString(false) : "";
+      if (rowText.get(y) === text) continue;
+      // A row going (or still) blank isn't a write worth stamping, whether
+      // it's genuinely never been touched -- just inside the margin window,
+      // e.g. padding below the cursor on a tall terminal -- or it held real
+      // content that just got erased (a `clear`, a redraw's `ESC[K`, ...).
+      // Its *old* rowByte entry, if any, has to go too, or an emptied row
+      // keeps sorting into whatever chronological slot its last real
+      // content occupied -- a phantom blank line landing in the middle of
+      // later, unrelated output instead of harmlessly falling back to
+      // offsetFor()'s current-epoch default.
+      rowText.set(y, text);
+      // translateToString(false) pads to the full column width -- a blank
+      // row is a string of spaces, never "", so this has to trim before
+      // deciding whether there's really anything here.
+      if (text.trim() !== "") rowByte.set(y, rowOffset + y);
+      else rowByte.delete(y);
+    }
+  }
   for (const code of [0, 1, 2, 7]) {
     disposables.push(term.parser.registerOscHandler(code, (data) => {
       if (isNormal()) titles.push({ code, text: data, byte: rowAt() });
@@ -361,23 +460,57 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
   }));
 
   const write = (chunk: Uint8Array): Promise<void> => new Promise(resolve => term.write(chunk, () => resolve()));
+  // Writing a whole file in one call only gives checkRows() one coarse
+  // checkpoint to work from (xterm.js's own onCursorMove fires once per
+  // write() call, not per row -- useless for a single whole-file write, and
+  // the reason this exists instead). Chunk at newline boundaries so a row's
+  // write time reflects when it was actually last touched, rather than
+  // whatever the final epoch happened to be by the time the whole file was
+  // done. Batched every LINES_PER_CHECKPOINT lines, not every single one:
+  // the bug this fixes needs to tell "hundreds of lines apart" from
+  // "nothing scrolled at all" (real captures found so far separate the two
+  // by dozens to thousands of lines), not "this exact line vs. the next
+  // one" -- and an awaited write() per line was a real slowdown (~5s for a
+  // 600KB capture) for precision this task doesn't need.
+  const LINES_PER_CHECKPOINT = 25;
+  async function writeChunked(chunk: Uint8Array) {
+    let start = 0, sinceCheckpoint = 0;
+    for (let i = 0; i < chunk.length; i++) {
+      if (chunk[i] === 0x0a && ++sinceCheckpoint >= LINES_PER_CHECKPOINT) {
+        await write(chunk.subarray(start, i + 1));
+        checkRows();
+        start = i + 1;
+        sinceCheckpoint = 0;
+      }
+    }
+    if (start < chunk.length) { await write(chunk.subarray(start)); checkRows(); }
+  }
 
   const sorted = resizes.slice().sort((a, b) => a.byte - b.byte);
   let pos = 0;
   for (const r of sorted) {
-    if (r.byte > pos) { await write(bytes.subarray(pos, r.byte)); pos = r.byte; }
+    if (r.byte > pos) { await writeChunked(bytes.subarray(pos, r.byte)); pos = r.byte; }
     term.resize(Math.max(20, r.cols | 0 || cols), Math.max(4, r.rows | 0 || rows));
   }
-  if (pos < bytes.length) await write(bytes.subarray(pos));
+  if (pos < bytes.length) await writeChunked(bytes.subarray(pos));
 
   for (const d of disposables) d.dispose();
 
   // Enumerate the final normal-buffer lines (never the alternate screen —
   // full-screen programs like vim/htop/less draw there and their frames are
-  // not session history), oldest first, wrapped rows rejoined. Rows still
-  // live at the end belong to whatever the last erase's offset was; rows
-  // already in real scrollback predate it and use whichever offset was active
-  // when they were actually written (found via `breakpoints`).
+  // not session history), oldest first, wrapped rows rejoined. Each row
+  // prefers its own precisely-tracked write time (rowByte, from
+  // checkRows()) over the coarse fallback below, which -- uniformly treating
+  // every row still live in the viewport as "just written, right now" -- is
+  // exactly what let a tall terminal's worth of old, merely still-visible
+  // content get attributed to whatever the last command happened to be. The
+  // fallback itself: still-live rows belong to whatever the last erase's
+  // offset was; rows already in real scrollback predate it and use
+  // whichever offset was active when they were actually written (found via
+  // `breakpoints`). rowByte should cover every row that ever had a
+  // character written to it; the fallback only actually matters for rows
+  // more than ROW_CHECK_MARGIN away from wherever the cursor ended up at
+  // every single newline boundary in the file -- vanishingly rare.
   const buf = term.buffer.normal;
   const offsetFor = (y: number): number => {
     if (y >= buf.baseY) return rowOffset; // still-live viewport row: the current epoch
@@ -392,7 +525,7 @@ export async function replay(bytes: Uint8Array, colsIn: number, rowsIn: number, 
     if (!line) continue;
     const text = line.translateToString(false);
     if (line.isWrapped && cur) cur.text += text;
-    else { if (cur) { cur.text = cur.text.replace(/\s+$/, ""); lines.push(cur); } cur = { text, byte: offsetFor(y) + y }; }
+    else { if (cur) { cur.text = cur.text.replace(/\s+$/, ""); lines.push(cur); } cur = { text, byte: rowByte.get(y) ?? (offsetFor(y) + y) }; }
   }
   if (cur) { cur.text = cur.text.replace(/\s+$/, ""); lines.push(cur); }
   lines.sort((a, b) => a.byte - b.byte);

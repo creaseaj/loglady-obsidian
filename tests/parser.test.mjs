@@ -124,6 +124,21 @@ test("clear does not discard commands still on screen", async () => {
   assert.equal(kept[99], "echo cmd-100");
 });
 
+test("commands stay in order across a clear even when writes are batched", async () => {
+  // A row's write-time tracking (checkRows()) only runs at newline-count
+  // checkpoints, not after every single write, for performance. A `clear`
+  // landing inside one of those checkpoint batches resets the cursor back
+  // near the top of the viewport, reusing rows the batch had already moved
+  // past -- rows that a checkpoint anchored purely to "wherever the cursor
+  // is now" would never look back at, leaving them stamped with the wrong
+  // (pre-clear) epoch and sorting the command they actually belong to into
+  // the middle of a much earlier one's neighborhood.
+  const s = await syntheticSession(commandBlocks(100, { clearEvery: 25 }));
+  const kept = s.entries.map(e => e.command).filter(c => c.startsWith("echo cmd-"));
+  const expected = Array.from({ length: 100 }, (_, i) => `echo cmd-${i + 1}`);
+  assert.deepEqual(kept, expected, "commands stay in their original order across every clear");
+});
+
 test("clear preserves each command's own output", async () => {
   const s = await syntheticSession(commandBlocks(40, { clearEvery: 7 }));
   const e = s.entries.find(x => x.command === "echo cmd-3");
